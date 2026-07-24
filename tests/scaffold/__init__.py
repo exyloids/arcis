@@ -1,0 +1,1 @@
+"""Repository scaffold tests."""

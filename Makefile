@@ -1,0 +1,19 @@
+.PHONY: api web test lint compose-up compose-down
+
+api:
+	python3 -m uvicorn apps.api.main:app --reload --port 8000
+
+web:
+	cd apps/web && npm run dev
+
+test:
+	python3 -m unittest discover -s tests -p 'test_*.py' -v
+
+lint:
+	python3 -m ruff check apps packages migrations tests spikes
+
+compose-up:
+	docker compose -f deploy/compose/docker-compose.yml up -d
+
+compose-down:
+	docker compose -f deploy/compose/docker-compose.yml down

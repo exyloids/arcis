@@ -1,0 +1,48 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "arcis-backend"
+version = "0.1.0"
+description = "Read-only personal finance tracker backend"
+requires-python = ">=3.12,<3.14"
+dependencies = [
+  "alembic>=1.13,<2",
+  "celery>=5.4,<6",
+  "cryptography>=43,<47",
+  "fastapi>=0.115,<1",
+  "pydantic-settings>=2.5,<3",
+  "psycopg[binary]>=3.2,<4",
+  "redis>=5,<6",
+  "sqlalchemy>=2.0,<3",
+  "uvicorn[standard]>=0.30,<1",
+]
+
+[project.optional-dependencies]
+dev = [
+  "httpx>=0.27,<1",
+  "mypy>=1.11,<2",
+  "pytest>=8,<9",
+  "pytest-asyncio>=0.24,<1",
+  "ruff>=0.8,<1",
+]
+
+[tool.setuptools.packages.find]
+where = ["packages/backend", "packages/contracts"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = [".", "apps/api", "packages/backend", "packages/contracts"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP"]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+packages = ["arcis_backend", "arcis_contracts"]

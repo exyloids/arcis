@@ -1,0 +1,1 @@
+"""Protected-document security tests."""

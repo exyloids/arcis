@@ -158,6 +158,40 @@ The first usable release will prioritize a trustworthy monthly-close workflow:
 manual statement import, accurate categorization, reconciliation, reporting,
 and then Gmail automation and AI features.
 
+## Development
+
+Copy `.env.example` to `.env`, then start the local infrastructure:
+
+```bash
+docker compose -f deploy/compose/docker-compose.yml up -d
+```
+
+Run the API locally:
+
+```bash
+python3 -m pip install -e '.[dev]'
+python3 -m alembic upgrade head
+python3 -m uvicorn apps.api.main:app --reload --port 8000
+```
+
+Run the web application in a second terminal:
+
+```bash
+cd apps/web
+npm ci
+npm run dev
+```
+
+Run the dependency-free test suite:
+
+```bash
+python3 -m unittest discover -s tests -p 'test_*.py' -v
+```
+
+The local stack exposes the web app on port `3000`, the API on port `8000`,
+PostgreSQL on `5432`, Redis on `6379`, and the S3-compatible MinIO service on
+`9000` with its console on `9001`.
+
 ## License
 
 License information will be added before implementation and distribution.

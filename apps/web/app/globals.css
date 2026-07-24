@@ -1,0 +1,15 @@
+:root {
+  color-scheme: light;
+  background: #f6f7f4;
+  color: #17221b;
+  font-family: Inter, ui-sans-serif, system-ui, sans-serif;
+}
+
+* { box-sizing: border-box; }
+body { margin: 0; }
+.shell { max-width: 760px; margin: 0 auto; padding: 18vh 2rem; }
+.eyebrow { color: #46755a; font-size: 0.75rem; font-weight: 700; letter-spacing: 0.14em; }
+h1 { font-size: clamp(2.5rem, 8vw, 5rem); line-height: 0.98; letter-spacing: -0.06em; margin: 1rem 0; }
+.lede { color: #526158; font-size: 1.2rem; line-height: 1.6; max-width: 38rem; }
+.status { align-items: center; background: #e4f2e8; border: 1px solid #b7d9c0; border-radius: 999px; color: #28633d; display: inline-flex; gap: 0.6rem; margin-top: 2rem; padding: 0.65rem 1rem; }
+.dot { background: #2e9b52; border-radius: 50%; height: 0.55rem; width: 0.55rem; }
