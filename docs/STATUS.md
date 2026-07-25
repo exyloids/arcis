@@ -12,6 +12,42 @@ The deterministic two-mailbox proof is complete. The remaining foundation
 gate needs two Google test mailboxes and a locally configured Google OAuth
 client; no credentials should be committed or shared in this repository.
 
+## FOUNDATION-003B implementation in progress
+
+- Added `spikes/gmail_provider_validation/gmail_provider_validation.py`, a
+  real Google OAuth and Gmail History API adapter using authorization-code
+  flow with PKCE, read-only scope, refresh-token exchange, and paginated
+  message-added discovery.
+- Added tests in `tests/gmail_provider_validation/` for PKCE/state, token
+  exchange, refresh behavior, secret redaction, pagination, de-duplication,
+  cursor advance, and explicit invalid-history handling.
+- Added `spikes/gmail_provider_validation/run_live_validation.py`, an
+  interactive local-only validator that holds credentials in process memory
+  and prints no codes or tokens.
+- Added the setup and evidence procedure in `docs/GMAIL_TESTING.md`.
+
+The task remains open until the live procedure succeeds for the configured
+test mailboxes and the safe results are recorded below.
+
+## FOUNDATION-007 implementation in progress
+
+- Added `scripts/catalog_samples.py`, which creates a local-only structural
+  catalog of `.eml` and PDF samples without emitting message content, subjects,
+  addresses, attachment names, or PDF text.
+- Added `fixtures/sanitized/README.md` with the fixture redaction and expected
+  result policy.
+- Added `example_transactions/` to `.gitignore` because it holds raw local
+  financial documents.
+- Added synthetic ICICI/HDFC alert and structured-statement fixtures with
+  expected normalized transaction records. These establish the committed
+  baseline; template-specific fixture expansion follows local review of each
+  raw source format.
+
+Result: the local catalog reports 20 email samples and 10 statement samples;
+the committed baseline contains four synthetic email fixtures, two structured
+statement fixtures, and matching normalized expectations. Fixture-policy tests
+passed on 2026-07-24.
+
 ## FOUNDATION-001 evidence
 
 - Fixture: `fixtures/sanitized/icici_bank_statement.csv`

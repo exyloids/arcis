@@ -12,6 +12,7 @@ starting work. Complete tasks in order and record evidence in `STATUS.md`.
 - [x] **FOUNDATION-004** Prove encrypted credential lifecycle and key rotation.
 - [x] **FOUNDATION-005** Prove protected-document processing without password persistence or telemetry leakage.
 - [x] **FOUNDATION-006** Prove interrupted-job retry and OpenAPI client contract generation.
+- [x] **FOUNDATION-007** Build a local sample catalog and sanitized golden fixture corpus for the initial ICICI and HDFC email and statement templates.
 
 ## Phase 1 — Trustworthy manual ledger
 

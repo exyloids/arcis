@@ -21,6 +21,7 @@ class CredentialSecurityTests(unittest.TestCase):
         new_key = b"new-key-material-32-bytes-long!!!"[:32]
         old_vault = CredentialVault({"2026-01": old_key}, "2026-01")
         repository = CredentialRepository(sqlite3.connect(":memory:"))
+        self.addCleanup(repository.connection.close)
         secret = old_vault.encrypt("refresh-token-value", "mailbox:one")
         repository.save("mailbox-one", secret)
 
@@ -48,6 +49,7 @@ class CredentialSecurityTests(unittest.TestCase):
     def test_revocation_blocks_credential_load(self):
         vault = CredentialVault({"2026-07": b"key-material-32-bytes-long!!!!!!"[:32]}, "2026-07")
         repository = CredentialRepository(sqlite3.connect(":memory:"))
+        self.addCleanup(repository.connection.close)
         repository.save("mailbox-one", vault.encrypt("token", "mailbox:one"))
         repository.revoke("mailbox-one")
         with self.assertRaisesRegex(ValueError, "revoked"):

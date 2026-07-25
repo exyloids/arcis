@@ -1,0 +1,10 @@
+From: HDFC Bank Alerts <alerts@alerts.hdfcbank.com>
+To: fixture-user@example.invalid
+Subject: You have done a UPI transaction. Check details!
+Date: Sat, 04 Jul 2026 18:45:00 +0530
+Message-ID: <hdfc-upi-debit-001@example.invalid>
+MIME-Version: 1.0
+Content-Type: text/plain; charset="utf-8"
+
+UPI transaction successful. Account XX9876 was debited by INR 399.00 on
+04-Jul-2026. Paid to Example Food Delivery. UTR: HDFC-SAN-EMAIL-001.

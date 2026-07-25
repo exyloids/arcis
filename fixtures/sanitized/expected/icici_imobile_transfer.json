@@ -1,0 +1,11 @@
+{
+  "currency": "INR",
+  "direction": "debit",
+  "financial_account_hint": "bank_account_ending_1234",
+  "merchant": "Example Savings Account",
+  "provider_reference": "ICICI-SAN-EMAIL-003",
+  "source_kind": "gmail_message",
+  "transaction_date": "2026-07-03",
+  "amount": "5000.00",
+  "transaction_kind": "transfer"
+}

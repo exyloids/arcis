@@ -25,11 +25,13 @@ coverage.xml
 htmlcov/
 .DS_Store
 *.log
+*.swp
 *.sqlite3
 *.db
 tmp/
 local-data/
 storage/
 uploads/
+example_transactions/
 dist/
 build/

@@ -1,0 +1,10 @@
+From: ICICI Bank Alerts <alerts@alerts.icicibank.com>
+To: fixture-user@example.invalid
+Subject: Transaction alert for your ICICI Bank Credit Card
+Date: Wed, 01 Jul 2026 10:30:00 +0530
+Message-ID: <icici-credit-card-purchase-001@example.invalid>
+MIME-Version: 1.0
+Content-Type: text/plain; charset="utf-8"
+
+Your ICICI Bank Credit Card ending 1234 was used for INR 1,250.00 on
+01-Jul-2026 at Example Books Store. Reference number: ICICI-SAN-EMAIL-001.

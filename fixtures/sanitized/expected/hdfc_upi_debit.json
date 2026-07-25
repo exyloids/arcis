@@ -1,0 +1,10 @@
+{
+  "currency": "INR",
+  "direction": "debit",
+  "financial_account_hint": "bank_account_ending_9876",
+  "merchant": "Example Food Delivery",
+  "provider_reference": "HDFC-SAN-EMAIL-001",
+  "source_kind": "gmail_message",
+  "transaction_date": "2026-07-04",
+  "amount": "399.00"
+}

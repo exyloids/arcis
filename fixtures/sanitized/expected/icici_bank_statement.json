@@ -1,0 +1,29 @@
+[
+  {
+    "amount": "850.00",
+    "currency": "INR",
+    "direction": "debit",
+    "narration": "UPI-SWIGGY-ORDER-001",
+    "provider_reference": "ICICI-SAN-001",
+    "source_kind": "statement_row",
+    "transaction_date": "2026-07-01"
+  },
+  {
+    "amount": "125000.00",
+    "currency": "INR",
+    "direction": "credit",
+    "narration": "NEFT-SALARY-JULY",
+    "provider_reference": "ICICI-SAN-002",
+    "source_kind": "statement_row",
+    "transaction_date": "2026-07-02"
+  },
+  {
+    "amount": "5000.00",
+    "currency": "INR",
+    "direction": "debit",
+    "narration": "ATM CASH WITHDRAWAL",
+    "provider_reference": "ICICI-SAN-003",
+    "source_kind": "statement_row",
+    "transaction_date": "2026-07-03"
+  }
+]

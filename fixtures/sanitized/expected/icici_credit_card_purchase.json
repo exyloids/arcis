@@ -1,0 +1,10 @@
+{
+  "currency": "INR",
+  "direction": "debit",
+  "financial_account_hint": "credit_card_ending_1234",
+  "merchant": "Example Books Store",
+  "provider_reference": "ICICI-SAN-EMAIL-001",
+  "source_kind": "gmail_message",
+  "transaction_date": "2026-07-01",
+  "amount": "1250.00"
+}

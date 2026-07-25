@@ -1,0 +1,10 @@
+From: ICICI Bank Alerts <alerts@alerts.icicibank.com>
+To: fixture-user@example.invalid
+Subject: Transaction alert for your ICICI Bank account
+Date: Thu, 02 Jul 2026 09:15:00 +0530
+Message-ID: <icici-account-debit-001@example.invalid>
+MIME-Version: 1.0
+Content-Type: text/plain; charset="utf-8"
+
+Your account XX1234 has been debited by INR 850.00 on 02-Jul-2026 for
+UPI payment to Example Grocery Market. Reference number: ICICI-SAN-EMAIL-002.

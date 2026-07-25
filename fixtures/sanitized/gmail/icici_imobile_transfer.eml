@@ -1,0 +1,10 @@
+From: ICICI Bank Alerts <alerts@alerts.icicibank.com>
+To: fixture-user@example.invalid
+Subject: Alert for transaction through ICICI Bank iMobile
+Date: Fri, 03 Jul 2026 14:20:00 +0530
+Message-ID: <icici-imobile-transfer-001@example.invalid>
+MIME-Version: 1.0
+Content-Type: text/plain; charset="utf-8"
+
+An iMobile transfer of INR 5,000.00 was made from account XX1234 on
+03-Jul-2026 to Example Savings Account. Reference number: ICICI-SAN-EMAIL-003.
