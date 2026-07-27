@@ -11,7 +11,7 @@ test:
 
 test-integration:
 	ARCIS_INTEGRATION_DATABASE_URL=postgresql+psycopg://arcis:arcis@localhost:5432/arcis \
-		.venv/bin/python -m unittest tests.integration.test_manual_ledger_postgres -v
+		.venv/bin/python -m unittest tests.integration.test_manual_ledger_postgres tests.integration.test_mailboxes_postgres tests.integration.test_sync_jobs_postgres -v
 
 lint:
 	python3 -m ruff check apps packages migrations tests spikes

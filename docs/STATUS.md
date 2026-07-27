@@ -6,10 +6,26 @@ Phase 2 — Gmail automation
 
 ## Current task
 
-GMAIL-001 — Persisted mailbox connections and encrypted OAuth credentials.
+GMAIL-002 — Asynchronous Gmail synchronization workflow.
 
 The manual-ledger milestone is complete. Real Gmail-provider validation remains
 an external configuration gate, requiring two configured Google test mailboxes.
+
+## GMAIL-001 evidence
+
+- Added application mailbox APIs to list Gmail mailboxes, persist a completed
+  Gmail connection, and disconnect/revoke a mailbox credential.
+- Added `arcis_backend.mailboxes` with AES-256-GCM encryption. Credential
+  associated data binds each secret to its user, mailbox, and Gmail provider.
+- Refresh tokens are ciphertext-only in `oauth_credentials`; list and save
+  responses never include them. Reconnecting the same Google subject replaces
+  the encrypted secret and clears revocation; disconnecting revokes it.
+- Mailboxes retain their independent `history_cursor` field for the upcoming
+  synchronization workflow.
+
+Verification completed on 2026-07-27: 40 generic tests passed (7 integration
+tests skipped without a database URL), and the dedicated PostgreSQL suite
+passed 7/7.
 
 ## Phase 1 — Trustworthy manual ledger
 

@@ -3,12 +3,16 @@ from datetime import UTC, datetime
 from uuid import UUID
 
 from arcis_backend import __version__
+from arcis_backend.gmail_oauth import GmailOAuthError, GmailOAuthService
 from arcis_backend.ledger import LedgerError, LedgerService, database_engine, inspect_tabular_upload
+from arcis_backend.mailboxes import CredentialCipher, MailboxError, MailboxService
 from arcis_backend.settings import get_settings
 from arcis_backend.storage import MinioArtifactStorage
+from arcis_backend.sync_jobs import GmailSyncJobService, SyncJobError
 from arcis_contracts.health import HealthResponse, ReadinessResponse
 from fastapi import FastAPI, File, Form, HTTPException, Query, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import RedirectResponse
 
 settings = get_settings()
 app = FastAPI(
@@ -34,6 +38,16 @@ ledger = LedgerService(
         settings.object_storage_bucket,
     ),
 )
+mailboxes = MailboxService(
+    database_engine(settings.database_url),
+    settings.demo_user_id,
+    CredentialCipher(settings.credential_encryption_key_version, settings.credential_encryption_key),
+)
+sync_jobs = GmailSyncJobService(database_engine(settings.database_url), settings.demo_user_id)
+gmail_oauth = GmailOAuthService(
+    database_engine(settings.database_url), settings.demo_user_id, mailboxes,
+    settings.gmail_oauth_client_id, settings.gmail_oauth_client_secret, settings.gmail_oauth_redirect_uri,
+)
 
 
 @app.on_event("startup")
@@ -42,6 +56,18 @@ def initialize_ledger() -> None:
 
 
 def ledger_error(error: LedgerError) -> HTTPException:
+    return HTTPException(status_code=422, detail=str(error))
+
+
+def mailbox_error(error: MailboxError) -> HTTPException:
+    return HTTPException(status_code=422, detail=str(error))
+
+
+def sync_job_error(error: SyncJobError) -> HTTPException:
+    return HTTPException(status_code=422, detail=str(error))
+
+
+def gmail_oauth_error(error: GmailOAuthError) -> HTTPException:
     return HTTPException(status_code=422, detail=str(error))
 
 
@@ -85,6 +111,74 @@ def create_account(payload: dict[str, object]) -> dict[str, object]:
 @app.get("/api/v1/categories", tags=["categories"])
 def list_categories() -> list[dict[str, object]]:
     return ledger.list_categories()
+
+
+@app.get("/api/v1/oauth/gmail/start", tags=["mailboxes"])
+def start_gmail_oauth() -> RedirectResponse:
+    try:
+        return RedirectResponse(gmail_oauth.start(), status_code=302)
+    except GmailOAuthError as error:
+        raise gmail_oauth_error(error) from error
+
+
+@app.get("/api/v1/oauth/gmail/callback", tags=["mailboxes"])
+def complete_gmail_oauth(code: str, state: str) -> RedirectResponse:
+    try:
+        gmail_oauth.complete(code, state)
+        return RedirectResponse("http://localhost:3000/?gmail=connected", status_code=302)
+    except GmailOAuthError as error:
+        raise gmail_oauth_error(error) from error
+
+
+@app.get("/api/v1/mailboxes", tags=["mailboxes"])
+def list_mailboxes() -> list[dict[str, object]]:
+    return mailboxes.list_mailboxes()
+
+
+@app.post("/api/v1/mailboxes/gmail", status_code=201, tags=["mailboxes"])
+def save_gmail_mailbox(payload: dict[str, object]) -> dict[str, object]:
+    try:
+        scopes = payload.get("granted_scopes", [])
+        if not isinstance(scopes, list) or not all(isinstance(scope, str) for scope in scopes):
+            raise MailboxError("granted_scopes must be a list of strings")
+        return mailboxes.save_gmail_connection(
+            str(payload.get("provider_subject", "")), str(payload.get("display_email", "")), scopes,
+            str(payload.get("refresh_token", "")),
+        )
+    except MailboxError as error:
+        raise mailbox_error(error) from error
+
+
+@app.post("/api/v1/mailboxes/{mailbox_id}/disconnect", status_code=204, tags=["mailboxes"])
+def disconnect_mailbox(mailbox_id: UUID) -> None:
+    try:
+        mailboxes.disconnect_mailbox(mailbox_id)
+    except MailboxError as error:
+        raise mailbox_error(error) from error
+
+
+@app.post("/api/v1/mailboxes/{mailbox_id}/sync", status_code=202, tags=["mailboxes"])
+def request_mailbox_sync(mailbox_id: UUID) -> dict[str, object]:
+    try:
+        return sync_jobs.request_sync(mailbox_id)
+    except SyncJobError as error:
+        raise sync_job_error(error) from error
+
+
+@app.get("/api/v1/sync-jobs/{job_id}", tags=["mailboxes"])
+def get_sync_job(job_id: UUID) -> dict[str, object]:
+    try:
+        return sync_jobs.get_job(job_id)
+    except SyncJobError as error:
+        raise sync_job_error(error) from error
+
+
+@app.post("/api/v1/sync-jobs/run-next", tags=["mailboxes"])
+def run_next_sync_job() -> dict[str, object] | None:
+    try:
+        return sync_jobs.run_next_baseline(mailboxes, gmail_oauth)
+    except SyncJobError as error:
+        raise sync_job_error(error) from error
 
 
 @app.post("/api/v1/categories", status_code=201, tags=["categories"])

@@ -58,6 +58,8 @@ services:
     build:
       context: ../..
       dockerfile: apps/api/Dockerfile
+    env_file:
+      - ../../.env
     environment:
       ARCIS_DATABASE_URL: postgresql+psycopg://arcis:arcis@postgres:5432/arcis
       ARCIS_REDIS_URL: redis://redis:6379/0
