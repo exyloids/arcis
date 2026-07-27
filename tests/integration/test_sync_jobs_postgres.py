@@ -25,6 +25,9 @@ class SyncJobsPostgresTests(unittest.TestCase):
         self.mailbox = mailbox.save_gmail_connection("sync-subject", "sync@example.com", ["scope"], "refresh-secret")
         self.service = GmailSyncJobService(self.engine, self.user_id)
 
+    def tearDown(self) -> None:
+        self.engine.dispose()
+
     def test_sync_request_is_mailbox_scoped_and_idempotent_while_active(self) -> None:
         first = self.service.request_sync(self.mailbox["id"])
         second = self.service.request_sync(self.mailbox["id"])

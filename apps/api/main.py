@@ -3,6 +3,9 @@ from datetime import UTC, datetime
 from uuid import UUID
 
 from arcis_backend import __version__
+from arcis_backend.candidates import CandidateService
+from arcis_backend.celery_app import celery_app
+from arcis_backend.gmail_artifacts import GmailArtifactRepository
 from arcis_backend.gmail_oauth import GmailOAuthError, GmailOAuthService
 from arcis_backend.ledger import LedgerError, LedgerService, database_engine, inspect_tabular_upload
 from arcis_backend.mailboxes import CredentialCipher, MailboxError, MailboxService
@@ -44,6 +47,12 @@ mailboxes = MailboxService(
     CredentialCipher(settings.credential_encryption_key_version, settings.credential_encryption_key),
 )
 sync_jobs = GmailSyncJobService(database_engine(settings.database_url), settings.demo_user_id)
+gmail_artifacts = GmailArtifactRepository(
+    database_engine(settings.database_url), settings.demo_user_id,
+    MinioArtifactStorage(settings.object_storage_endpoint, settings.object_storage_access_key,
+                         settings.object_storage_secret_key, settings.object_storage_bucket),
+)
+candidates = CandidateService(database_engine(settings.database_url), settings.demo_user_id)
 gmail_oauth = GmailOAuthService(
     database_engine(settings.database_url), settings.demo_user_id, mailboxes,
     settings.gmail_oauth_client_id, settings.gmail_oauth_client_secret, settings.gmail_oauth_redirect_uri,
@@ -113,6 +122,32 @@ def list_categories() -> list[dict[str, object]]:
     return ledger.list_categories()
 
 
+@app.get("/api/v1/parser-candidates", tags=["mailboxes"])
+def list_parser_candidates(state: str | None = None) -> list[dict[str, object]]:
+    return candidates.list(state)
+
+
+@app.get("/api/v1/parser-candidates/metrics", tags=["mailboxes"])
+def parser_candidate_metrics() -> list[dict[str, object]]:
+    return candidates.metrics()
+
+
+@app.post("/api/v1/parser-candidates/{candidate_id}/review", tags=["mailboxes"])
+def review_parser_candidate(candidate_id: UUID, payload: dict[str, str]) -> dict[str, object]:
+    try:
+        return candidates.review(candidate_id, payload.get("state", ""))
+    except ValueError as error:
+        raise HTTPException(status_code=422, detail=str(error)) from error
+
+
+@app.patch("/api/v1/parser-candidates/{candidate_id}/account", tags=["mailboxes"])
+def assign_parser_candidate_account(candidate_id: UUID, payload: dict[str, str]) -> dict[str, object]:
+    try:
+        return candidates.assign_account(candidate_id, UUID(payload.get("financial_account_id", "")))
+    except (ValueError, TypeError) as error:
+        raise HTTPException(status_code=422, detail=str(error)) from error
+
+
 @app.get("/api/v1/oauth/gmail/start", tags=["mailboxes"])
 def start_gmail_oauth() -> RedirectResponse:
     try:
@@ -160,9 +195,24 @@ def disconnect_mailbox(mailbox_id: UUID) -> None:
 @app.post("/api/v1/mailboxes/{mailbox_id}/sync", status_code=202, tags=["mailboxes"])
 def request_mailbox_sync(mailbox_id: UUID) -> dict[str, object]:
     try:
-        return sync_jobs.request_sync(mailbox_id)
+        job = sync_jobs.request_sync(mailbox_id)
+        # The database job is the source of truth; Celery only receives a
+        # lightweight wake-up task that claims the next queued job.
+        celery_app.send_task("arcis.gmail.run_next")
+        return job
     except SyncJobError as error:
         raise sync_job_error(error) from error
+
+
+@app.post("/api/v1/mailboxes/{mailbox_id}/backfill", tags=["mailboxes"])
+def backfill_mailbox(mailbox_id: UUID, payload: dict[str, object]) -> dict[str, int]:
+    try:
+        return sync_jobs.backfill(
+            mailbox_id, str(payload.get("query", "")), mailboxes, gmail_oauth, gmail_artifacts, candidates,
+            int(payload.get("max_results", 500)),
+        )
+    except (SyncJobError, ValueError) as error:
+        raise HTTPException(status_code=422, detail=str(error)) from error
 
 
 @app.get("/api/v1/sync-jobs/{job_id}", tags=["mailboxes"])
@@ -173,10 +223,15 @@ def get_sync_job(job_id: UUID) -> dict[str, object]:
         raise sync_job_error(error) from error
 
 
+@app.get("/api/v1/mailboxes/{mailbox_id}/sync-history", tags=["mailboxes"])
+def mailbox_sync_history(mailbox_id: UUID, limit: int = 25) -> list[dict[str, object]]:
+    return sync_jobs.history(mailbox_id, limit)
+
+
 @app.post("/api/v1/sync-jobs/run-next", tags=["mailboxes"])
 def run_next_sync_job() -> dict[str, object] | None:
     try:
-        return sync_jobs.run_next_baseline(mailboxes, gmail_oauth)
+        return sync_jobs.run_next(mailboxes, gmail_oauth, gmail_artifacts, candidates)
     except SyncJobError as error:
         raise sync_job_error(error) from error
 

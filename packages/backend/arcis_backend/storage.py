@@ -37,6 +37,11 @@ class MinioArtifactStorage:
     def delete(self, object_key: str) -> None:
         self.client.remove_object(self.bucket, object_key)
 
+    def put_gmail_message(self, user_id: UUID, mailbox_id: UUID, message_id: str, content: bytes) -> StoredArtifact:
+        object_key = f"gmail/{user_id}/{mailbox_id}/{message_id}.eml"
+        self.client.put_object(self.bucket, object_key, io.BytesIO(content), len(content), content_type="message/rfc822")
+        return StoredArtifact(object_key=object_key, content_type="message/rfc822", byte_size=len(content))
+
     def iter_object(self, object_key: str) -> Iterator[bytes]:
         response = self.client.get_object(self.bucket, object_key)
         try:

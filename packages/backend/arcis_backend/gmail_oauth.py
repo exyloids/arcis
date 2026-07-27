@@ -7,6 +7,7 @@ import hashlib
 import json
 import secrets
 from datetime import UTC, datetime, timedelta
+from urllib.error import HTTPError
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 from uuid import UUID, uuid4
@@ -20,6 +21,7 @@ AUTHORIZE_URL = "https://accounts.google.com/o/oauth2/v2/auth"
 TOKEN_URL = "https://oauth2.googleapis.com/token"
 PROFILE_URL = "https://gmail.googleapis.com/gmail/v1/users/me/profile"
 HISTORY_URL = "https://gmail.googleapis.com/gmail/v1/users/me/history"
+MESSAGE_URL = "https://gmail.googleapis.com/gmail/v1/users/me/messages"
 READONLY_SCOPE = "https://www.googleapis.com/auth/gmail.readonly"
 
 
@@ -107,6 +109,38 @@ class GmailOAuthService:
                 return tuple(dict.fromkeys(message_ids)), final_history_id
             page_token = next_page
 
+    def raw_message(self, access_token: str, message_id: str) -> bytes:
+        try:
+            payload = self._json_get(f"{MESSAGE_URL}/{message_id}?format=raw", access_token)
+        except GmailOAuthError as error:
+            if str(error) == "Google OAuth request failed (HTTP 404)":
+                raise GmailOAuthError("Gmail message is no longer available") from error
+            raise
+        raw = payload.get("raw")
+        if not isinstance(raw, str):
+            raise GmailOAuthError("Google did not return a raw Gmail message")
+        try:
+            return base64.urlsafe_b64decode(raw + "=" * (-len(raw) % 4))
+        except ValueError as error:
+            raise GmailOAuthError("Google returned an invalid raw Gmail message") from error
+
+    def search_message_ids(self, access_token: str, query: str, max_results: int = 500) -> tuple[str, ...]:
+        page_token: str | None = None
+        message_ids: list[str] = []
+        while len(message_ids) < max_results:
+            params = {"q": query, "maxResults": str(min(100, max_results - len(message_ids)))}
+            if page_token:
+                params["pageToken"] = page_token
+            payload = self._json_get(f"{MESSAGE_URL}?{urlencode(params)}", access_token)
+            messages = payload.get("messages", [])
+            if not isinstance(messages, list):
+                raise GmailOAuthError("Google returned invalid Gmail search results")
+            message_ids.extend(item["id"] for item in messages if isinstance(item, dict) and isinstance(item.get("id"), str))
+            page_token = payload.get("nextPageToken")
+            if not isinstance(page_token, str) or not page_token:
+                break
+        return tuple(dict.fromkeys(message_ids))
+
     def _json_post(self, url: str, values: dict[str, str]) -> dict[str, object]:
         return self._request(Request(url, data=urlencode(values).encode(), headers={"Content-Type": "application/x-www-form-urlencoded"}, method="POST"))
 
@@ -117,6 +151,20 @@ class GmailOAuthService:
         try:
             with urlopen(request, timeout=30) as response:  # noqa: S310 - fixed Google endpoints
                 value = json.loads(response.read().decode())
+        except HTTPError as error:
+            # Google's OAuth error payload contains a stable error code, not
+            # credentials. Preserve only a safe, actionable classification.
+            try:
+                payload = json.loads(error.read().decode())
+            except (UnicodeDecodeError, json.JSONDecodeError):
+                payload = {}
+            if isinstance(payload, dict) and payload.get("error") == "invalid_grant":
+                raise GmailOAuthError("Gmail authorization needs to be reconnected") from error
+            if error.code in {401, 403}:
+                raise GmailOAuthError("Gmail authorization needs to be reconnected") from error
+            if error.code == 404 and request.full_url.startswith(HISTORY_URL):
+                raise GmailOAuthError("Gmail history cursor has expired") from error
+            raise GmailOAuthError(f"Google OAuth request failed (HTTP {error.code})") from error
         except Exception as error:
             raise GmailOAuthError("Google OAuth request failed") from error
         if not isinstance(value, dict):

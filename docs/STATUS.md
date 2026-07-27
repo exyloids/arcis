@@ -6,7 +6,7 @@ Phase 2 — Gmail automation
 
 ## Current task
 
-GMAIL-002 — Asynchronous Gmail synchronization workflow.
+Phase 2 — Gmail automation complete.
 
 The manual-ledger milestone is complete. Real Gmail-provider validation remains
 an external configuration gate, requiring two configured Google test mailboxes.
@@ -23,9 +23,21 @@ an external configuration gate, requiring two configured Google test mailboxes.
 - Mailboxes retain their independent `history_cursor` field for the upcoming
   synchronization workflow.
 
-Verification completed on 2026-07-27: 40 generic tests passed (7 integration
-tests skipped without a database URL), and the dedicated PostgreSQL suite
-passed 7/7.
+Verification completed on 2026-07-27: 46 generic tests passed (9 integration
+tests skipped without a database URL), the dedicated PostgreSQL suite passed
+9/9, and the Next.js production build passed.
+
+## Phase 2 completion
+
+- Added Gmail OAuth with durable PKCE state, encrypted refresh-token storage,
+  mailbox-local History cursors, and disconnect/revocation controls.
+- Added queued Sync Now jobs, worker-safe claims, Celery worker/Beat services,
+  daily scheduling, bounded historical search, and mailbox sync history.
+- Gmail History ingestion stores idempotent raw message artifacts in MinIO;
+  cursors advance only after all retrieved messages persist successfully.
+- Added ICICI account/card/iMobile and HDFC UPI adapters, candidate review,
+  parser metrics, and evidence-preserving acceptance into canonical ledger
+  transactions.
 
 ## Phase 1 — Trustworthy manual ledger
 

@@ -22,6 +22,9 @@ class MailboxPostgresTests(unittest.TestCase):
         LedgerService(self.engine, self.user_id).initialize_user()
         self.service = MailboxService(self.engine, self.user_id, CredentialCipher("test-v1", KEY))
 
+    def tearDown(self) -> None:
+        self.engine.dispose()
+
     def test_connection_persists_ciphertext_and_does_not_expose_refresh_token(self) -> None:
         connected = self.service.save_gmail_connection(
             "google-subject-1", "Owner@Example.com", ["https://www.googleapis.com/auth/gmail.readonly"], "refresh-secret"

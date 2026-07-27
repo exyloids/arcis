@@ -24,10 +24,10 @@ starting work. Complete tasks in order and record evidence in `STATUS.md`.
 ## Phase 2 — Gmail automation
 
 - [x] **GMAIL-001** Persist Gmail mailbox connections, encrypted OAuth credentials, and mailbox-local synchronization cursors in the application backend.
-- [ ] **GMAIL-002** Implement the asynchronous Gmail synchronization workflow, including Sync Now, incremental history retrieval, idempotent source-artifact persistence, and recoverable job state.
-- [ ] **GMAIL-003** Implement the initial ICICI transaction-alert adapter using sanitized fixtures and a parser-review queue for unsupported messages.
-- [ ] **GMAIL-004** Implement the initial HDFC transaction-alert adapter, parser metrics, and safe failure reporting.
-- [ ] **GMAIL-005** Add scheduled mailbox synchronization and user-visible run history after on-demand synchronization is reliable.
+- [x] **GMAIL-002** Implement the asynchronous Gmail synchronization workflow, including Sync Now, incremental history retrieval, idempotent source-artifact persistence, and recoverable job state.
+- [x] **GMAIL-003** Implement the initial ICICI transaction-alert adapter using sanitized fixtures and a parser-review queue for unsupported messages.
+- [x] **GMAIL-004** Implement the initial HDFC transaction-alert adapter, parser metrics, and safe failure reporting.
+- [x] **GMAIL-005** Add scheduled mailbox synchronization and user-visible run history after on-demand synchronization is reliable.
 
 ## Update protocol
 

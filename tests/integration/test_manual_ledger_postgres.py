@@ -14,7 +14,8 @@ DATABASE_URL = os.getenv("ARCIS_INTEGRATION_DATABASE_URL")
 @unittest.skipUnless(DATABASE_URL, "set ARCIS_INTEGRATION_DATABASE_URL to run PostgreSQL integration tests")
 class ManualLedgerPostgresTests(unittest.TestCase):
     def setUp(self) -> None:
-        self.service = LedgerService(database_engine(DATABASE_URL), uuid4())
+        self.engine = database_engine(DATABASE_URL)
+        self.service = LedgerService(self.engine, uuid4())
         self.service.initialize_user()
         self.account = self.service.create_account(
             {
@@ -31,6 +32,9 @@ class ManualLedgerPostgresTests(unittest.TestCase):
             b"01/07/2026,01/07/2026,UPI-TEST-MERCHANT,100.00,,REF-001\n"
             b"02/07/2026,02/07/2026,NEFT-SALARY,,1000.00,REF-002\n"
         )
+
+    def tearDown(self) -> None:
+        self.engine.dispose()
 
     def test_preview_confirm_replay_and_monthly_report(self) -> None:
         preview = self.service.stage_import(self.account["id"], "statement.csv", self.content)

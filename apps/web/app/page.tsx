@@ -27,6 +27,8 @@ type Report = { income: string; expense: string; categories: Array<{ category: s
 type ImportItem = { id: string; filename: string; state: string; row_count: number; valid_row_count: number; invalid_row_count: number; duplicate_count: number; created_at: string; confirmed_at: string | null };
 type Inspection = { headers: string[]; suggested_mapping: Record<string, string>; sample_row_count: number };
 type Mapping = Record<string, string>;
+type Mailbox = { id: string; display_email: string; connection_status: string; history_cursor: string | null; last_successful_sync_at: string | null };
+type Candidate = { id: string; parser_name: string; state: string; review_reason: string | null; financial_account_id: string | null; normalized: Record<string, string> };
 const mappingFields: Array<[keyof Mapping, string, boolean]> = [
   ["transaction_date", "Transaction date", true], ["posted_date", "Posted date", false],
   ["narration", "Narration", true], ["debit", "Debit amount", true],
@@ -59,6 +61,10 @@ export default function HomePage() {
   const [search, setSearch] = useState("");
   const [evidence, setEvidence] = useState<Array<Record<string, string>> | null>(null);
   const [nextCursor, setNextCursor] = useState<string | null>(null);
+  const [mailboxes, setMailboxes] = useState<Mailbox[]>([]);
+  const [candidates, setCandidates] = useState<Candidate[]>([]);
+  const [backfillMailboxId, setBackfillMailboxId] = useState("");
+  const [backfillQuery, setBackfillQuery] = useState("from:(alerts@alerts.icicibank.com OR alerts@alerts.hdfcbank.com) newer_than:365d");
   const month = new Date().toISOString().slice(0, 7);
 
   async function refresh() {
@@ -66,12 +72,14 @@ export default function HomePage() {
     if (ledgerAccountId) ledgerParams.set("account_id", ledgerAccountId);
     if (ledgerCategoryId) ledgerParams.set("category_id", ledgerCategoryId);
     if (search.trim()) ledgerParams.set("q", search.trim());
-    const [nextAccounts, nextCategories, transactionPage, nextReport, nextImports] = await Promise.all([
+    const [nextAccounts, nextCategories, transactionPage, nextReport, nextImports, nextMailboxes, nextCandidates] = await Promise.all([
       request<Account[]>("/api/v1/financial-accounts"),
       request<Category[]>("/api/v1/categories"),
       request<TransactionPage>(`/api/v1/transactions/page?${ledgerParams}`),
       request<Report>(`/api/v1/reports/monthly?month=${month}`),
       request<ImportItem[]>("/api/v1/imports"),
+      request<Mailbox[]>("/api/v1/mailboxes"),
+      request<Candidate[]>("/api/v1/parser-candidates"),
     ]);
     setAccounts(nextAccounts);
     setCategories(nextCategories);
@@ -79,7 +87,10 @@ export default function HomePage() {
     setNextCursor(transactionPage.next_cursor);
     setReport(nextReport);
     setImports(nextImports);
+    setMailboxes(nextMailboxes);
+    setCandidates(nextCandidates);
     if (!accountId && nextAccounts[0]) setAccountId(nextAccounts[0].id);
+    if (!backfillMailboxId && nextMailboxes[0]) setBackfillMailboxId(nextMailboxes[0].id);
   }
 
   useEffect(() => { void refresh().catch((error: Error) => setMessage(error.message)); }, []);
@@ -170,6 +181,31 @@ export default function HomePage() {
     } catch (error) { setMessage((error as Error).message); }
   }
 
+  async function syncMailbox(mailboxId: string) {
+    try { const job = await request<{ id: string }>(`/api/v1/mailboxes/${mailboxId}/sync`, { method: "POST" }); setMessage(`Sync queued: ${job.id}`); }
+    catch (error) { setMessage((error as Error).message); }
+  }
+
+  async function reviewCandidate(id: string, state: "accepted" | "rejected") {
+    try { await request(`/api/v1/parser-candidates/${id}/review`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ state }) }); setMessage(`Candidate ${state}.`); await refresh(); }
+    catch (error) { setMessage((error as Error).message); }
+  }
+
+  async function assignCandidateAccount(candidateId: string, financialAccountId: string) {
+    if (!financialAccountId) return setMessage("Select an account first.");
+    try {
+      await request(`/api/v1/parser-candidates/${candidateId}/account`, { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ financial_account_id: financialAccountId }) });
+      setMessage("Candidate account assigned. You can now accept it.");
+      await refresh();
+    } catch (error) { setMessage((error as Error).message); }
+  }
+
+  async function backfillMailbox(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    try { const result = await request<{ scanned: number; added: number; duplicates: number }>(`/api/v1/mailboxes/${backfillMailboxId}/backfill`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ query: backfillQuery, max_results: 500 }) }); setMessage(`Backfill complete: ${result.scanned} scanned, ${result.added} added, ${result.duplicates} duplicates.`); await refresh(); }
+    catch (error) { setMessage((error as Error).message); }
+  }
+
   return <main className="workspace">
     <header><p className="eyebrow">ARCIS · MANUAL LEDGER</p><h1>Statements into a trustworthy ledger.</h1><p>Upload a structured statement, review every parsed row, then confirm it once.</p></header>
     {message && <p className="notice" role="status">{message}</p>}
@@ -189,6 +225,8 @@ export default function HomePage() {
       </form>
       <section className="card"><h2>This month</h2><p className="metric">Income ₹{report?.income ?? "0"}</p><p className="metric expense">Expense ₹{report?.expense ?? "0"}</p></section>
     </section>
+    <section className="card wide"><h2>Gmail sync</h2><p><a href={`${API_URL}/api/v1/oauth/gmail/start`}>Connect Gmail</a></p>{mailboxes.length ? <><div className="table-wrap"><table><thead><tr><th>Mailbox</th><th>Status</th><th>Last sync</th><th>Action</th></tr></thead><tbody>{mailboxes.map((mailbox) => <tr key={mailbox.id}><td>{mailbox.display_email}</td><td>{mailbox.connection_status}</td><td>{mailbox.last_successful_sync_at ? new Date(mailbox.last_successful_sync_at).toLocaleString() : "Not yet synced"}</td><td><button className="secondary" onClick={() => void syncMailbox(mailbox.id)}>Sync now</button></td></tr>)}</tbody></table></div><form className="backfill" onSubmit={backfillMailbox}><h3>Historical bank-email import</h3><select value={backfillMailboxId} onChange={(event) => setBackfillMailboxId(event.target.value)}>{mailboxes.map((mailbox) => <option key={mailbox.id} value={mailbox.id}>{mailbox.display_email}</option>)}</select><input value={backfillQuery} onChange={(event) => setBackfillQuery(event.target.value)} aria-label="Gmail backfill query" /><button type="submit">Backfill matching emails</button></form></> : <p className="hint">Connect a Gmail mailbox to begin.</p>}</section>
+    <section className="card wide"><h2>Email parser review</h2>{candidates.length ? <div className="table-wrap"><table><thead><tr><th>Parser</th><th>Merchant</th><th>Amount</th><th>Status</th><th>Account and review</th></tr></thead><tbody>{candidates.map((candidate) => { const accountType = candidate.normalized.financial_account_hint?.startsWith("credit_card_") ? "credit_card" : "bank_account"; const eligibleAccounts = accounts.filter((account) => account.account_type === accountType); const actionable = ["ready", "needs_review"].includes(candidate.state); return <tr key={candidate.id}><td>{candidate.parser_name}</td><td>{candidate.normalized.merchant ?? candidate.review_reason ?? "Unsupported"}</td><td>{candidate.normalized.amount ?? "—"}</td><td>{candidate.state}</td><td>{actionable && <><select value={candidate.financial_account_id ?? ""} onChange={(event) => void assignCandidateAccount(candidate.id, event.target.value)} aria-label="Assign account"><option value="">Select {accountType.replace("_", " ")}</option>{eligibleAccounts.map((account) => <option key={account.id} value={account.id}>{account.display_name}</option>)}</select>{candidate.state === "ready" && <button className="secondary" onClick={() => void reviewCandidate(candidate.id, "accepted")}>Accept</button>} <button className="secondary" onClick={() => void reviewCandidate(candidate.id, "rejected")}>Reject</button></>}{candidate.state === "unsupported" && <button className="secondary" onClick={() => void reviewCandidate(candidate.id, "rejected")}>Reject</button>}</td></tr>; })}</tbody></table></div> : <p className="hint">No parsed Gmail messages awaiting review.</p>}</section>
     {inspection && <section className="card wide"><h2>Column mapping · {file?.name}</h2><p>Review the detected columns before parsing the statement.</p><div className="mapping-grid">{mappingFields.map(([field, label, required]) => <label key={field}>{label}{required ? " *" : ""}<select value={mapping[field] ?? ""} onChange={(event) => setMapping({ ...mapping, [field]: event.target.value })}><option value="">{required ? "Select column" : "Not available"}</option>{inspection.headers.map((header) => <option key={header} value={header}>{header}</option>)}</select></label>)}</div><button onClick={() => void createPreview()}>Create preview</button></section>}
     {preview && <section className="card wide"><h2>Import preview · {preview.import.filename}</h2><p>{preview.import.valid_row_count} valid and {preview.import.invalid_row_count} invalid rows from {preview.import.row_count} source rows.</p>{preview.errors.length > 0 && <div className="import-errors"><h3>Rows needing review</h3><ul>{preview.errors.map((error) => <li key={error.ordinal}>Row {error.ordinal}: {error.message}</li>)}</ul></div>}<LedgerTable transactions={preview.rows} />{preview.import.state === "preview_ready" && <button onClick={confirmImport}>Confirm valid rows</button>}</section>}
     <section className="card wide"><h2>Import history</h2>{imports.length ? <div className="table-wrap"><table><thead><tr><th>File</th><th>Status</th><th>Valid / invalid</th><th>Duplicates</th><th>Created</th><th>Action</th></tr></thead><tbody>{imports.map((item) => <tr key={item.id}><td>{item.filename}</td><td><span className={`state ${item.state}`}>{item.state.replaceAll("_", " ")}</span></td><td>{item.valid_row_count} / {item.invalid_row_count}</td><td>{item.duplicate_count}</td><td>{new Date(item.created_at).toLocaleString()}</td><td><button className="secondary" onClick={() => void openImport(item.id)}>View</button>{item.state === "preview_ready" && <button className="secondary" onClick={() => void cancelImport(item.id)}>Cancel</button>}</td></tr>)}</tbody></table></div> : <p className="hint">No imports yet.</p>}</section>
