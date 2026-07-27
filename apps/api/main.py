@@ -177,6 +177,28 @@ def list_transactions(
     )
 
 
+@app.get("/api/v1/transactions/page", tags=["ledger"])
+def transaction_page(
+    month: str | None = Query(default=None, pattern=r"^\d{4}-\d{2}$"),
+    account_id: UUID | None = None,
+    category_id: UUID | None = None,
+    q: str | None = Query(default=None, min_length=1, max_length=100),
+    cursor: str | None = Query(default=None, max_length=200),
+    limit: int = Query(default=50, ge=1, le=200),
+) -> dict[str, object]:
+    try:
+        return ledger.transaction_page(
+            month=month,
+            account_id=account_id,
+            category_id=category_id,
+            query_text=q,
+            cursor=cursor,
+            limit=limit,
+        )
+    except LedgerError as error:
+        raise ledger_error(error) from error
+
+
 @app.get("/api/v1/transactions/{transaction_id}/evidence", tags=["ledger"])
 def get_transaction_evidence(transaction_id: UUID) -> list[dict[str, object]]:
     return ledger.transaction_evidence(transaction_id)

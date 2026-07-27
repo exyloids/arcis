@@ -5,3 +5,8 @@ h1 { font-size: clamp(2rem, 6vw, 4rem); margin: 8px 0; } h2 { margin-top: 0; } .
 form { display: grid; gap: 10px; } input, select, button { border-radius: 7px; padding: 10px; font: inherit; } input, select { background: #0b1220; border: 1px solid #3d5274; color: inherit; } button { background: #62d6b1; border: 0; color: #08251f; font-weight: 700; cursor: pointer; }.table-wrap { overflow-x: auto; } table { width: 100%; border-collapse: collapse; } th, td { border-bottom: 1px solid #263650; padding: 10px; text-align: left; white-space: nowrap; }
 .secondary { background: #d9b86f; color: #2a2109; padding: 6px 10px; }.state { text-transform: capitalize; }.state.confirmed { color: #62d6b1; }.state.cancelled, .state.failed { color: #ff9c9c; }
 .mapping-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); gap: 12px; margin: 16px 0; }.mapping-grid label { display: grid; gap: 6px; font-weight: 700; }
+.ledger-filters { display: grid; grid-template-columns: 2fr 1fr 1fr auto; gap: 10px; margin-bottom: 16px; } pre { overflow: auto; background: #0b1220; padding: 14px; border-radius: 8px; }
+@media (max-width: 700px) { .ledger-filters { grid-template-columns: 1fr; } }
+.load-more { margin-top: 16px; }
+.import-errors { border-left: 3px solid #c65d07; margin: 16px 0; padding: 4px 16px; }
+.import-errors h3 { margin-bottom: 6px; }

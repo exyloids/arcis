@@ -7,6 +7,8 @@ canonical transactions.
 
 from __future__ import annotations
 
+import base64
+import binascii
 import csv
 import hashlib
 import io
@@ -139,8 +141,8 @@ class LedgerService:
         self, account_id: UUID, filename: str, content: bytes, column_mapping: dict[str, str] | None = None
     ) -> dict[str, object]:
         self._require_account(account_id)
-        rows = _parse_tabular_upload_with_mapping(filename, content, column_mapping)
-        if not rows:
+        rows, row_errors = _parse_tabular_upload_with_issues(filename, content, column_mapping)
+        if not rows and not row_errors:
             raise LedgerError("The uploaded statement has no transaction rows")
         import_id = uuid4()
         content_hash = hashlib.sha256(content).hexdigest()
@@ -162,9 +164,11 @@ class LedgerService:
                 text(
                     """
                     INSERT INTO imports (id, user_id, financial_account_id, filename, content_sha256, state,
-                                         row_count, object_key, detected_mime_type, byte_size)
-                    VALUES (:id, :user_id, :account_id, :filename, :content_sha256, 'preview_ready', :row_count,
-                            :object_key, :detected_mime_type, :byte_size)
+                                         row_count, valid_row_count, invalid_row_count, error_code, object_key,
+                                         detected_mime_type, byte_size)
+                    VALUES (:id, :user_id, :account_id, :filename, :content_sha256, :state, :row_count,
+                            :valid_row_count, :invalid_row_count, :error_code, :object_key,
+                            :detected_mime_type, :byte_size)
                     """
                 ),
                 {
@@ -173,7 +177,11 @@ class LedgerService:
                     "account_id": account_id,
                     "filename": _safe_filename(filename),
                     "content_sha256": content_hash,
-                    "row_count": len(rows),
+                    "state": "preview_ready" if rows else "failed",
+                    "row_count": len(rows) + len(row_errors),
+                    "valid_row_count": len(rows),
+                    "invalid_row_count": len(row_errors),
+                    "error_code": "row_validation_failed" if row_errors else None,
                     "object_key": stored.object_key if stored else None,
                     "detected_mime_type": stored.content_type if stored else None,
                     "byte_size": stored.byte_size if stored else len(content),
@@ -192,11 +200,20 @@ class LedgerService:
                     ),
                     {"id": uuid4(), "import_id": import_id, "ordinal": ordinal, **row},
                 )
+            for error in row_errors:
+                session.execute(
+                    text(
+                        """INSERT INTO import_row_errors (id, import_id, ordinal, message)
+                        VALUES (:id, :import_id, :ordinal, :message)"""
+                    ),
+                    {"id": uuid4(), "import_id": import_id, **error},
+                )
         return self.import_preview(import_id)
 
     def import_preview(self, import_id: UUID) -> dict[str, object]:
         import_row = self._one(
-            "SELECT id, financial_account_id, filename, state, row_count, created_at FROM imports "
+            "SELECT id, financial_account_id, filename, state, row_count, valid_row_count, invalid_row_count, "
+            "created_at FROM imports "
             "WHERE id = :id AND user_id = :user_id",
             {"id": import_id, "user_id": self.user_id},
         )
@@ -205,11 +222,16 @@ class LedgerService:
             "provider_reference FROM import_rows WHERE import_id = :id ORDER BY ordinal",
             {"id": import_id},
         )
-        return {"import": import_row, "rows": rows}
+        errors = self._rows(
+            "SELECT ordinal, message FROM import_row_errors WHERE import_id = :id ORDER BY ordinal",
+            {"id": import_id},
+        )
+        return {"import": import_row, "rows": rows, "errors": errors}
 
     def list_imports(self) -> list[dict[str, object]]:
         return self._rows(
-            """SELECT id, financial_account_id, filename, state, row_count, duplicate_count,
+            """SELECT id, financial_account_id, filename, state, row_count, valid_row_count, invalid_row_count,
+            duplicate_count,
             confirmed_at, created_at FROM imports WHERE user_id = :user_id ORDER BY created_at DESC"""
         )
 
@@ -338,7 +360,7 @@ class LedgerService:
         query = """
             SELECT t.id, t.financial_account_id, a.display_name AS account_name, t.transaction_date,
                    t.posted_date, t.narration, t.amount, t.currency, t.direction, t.transaction_kind,
-                   t.reconciliation_state, c.name AS category
+                   t.reconciliation_state, t.category_id, c.name AS category
             FROM transactions t JOIN financial_accounts a ON a.id = t.financial_account_id
             LEFT JOIN categories c ON c.id = t.category_id
             WHERE t.user_id = :user_id
@@ -358,6 +380,51 @@ class LedgerService:
             parameters["query_text"] = f"%{query_text.strip()}%"
         parameters["limit"] = min(max(limit, 1), 200)
         return self._rows(query + " ORDER BY t.transaction_date DESC, t.created_at DESC LIMIT :limit", parameters)
+
+    def transaction_page(
+        self,
+        *,
+        month: str | None = None,
+        account_id: UUID | None = None,
+        category_id: UUID | None = None,
+        query_text: str | None = None,
+        cursor: str | None = None,
+        limit: int = 50,
+    ) -> dict[str, object]:
+        query = """
+            SELECT t.id, t.financial_account_id, a.display_name AS account_name, t.transaction_date,
+                   t.posted_date, t.narration, t.amount, t.currency, t.direction, t.transaction_kind,
+                   t.reconciliation_state, t.category_id, c.name AS category
+            FROM transactions t JOIN financial_accounts a ON a.id = t.financial_account_id
+            LEFT JOIN categories c ON c.id = t.category_id
+            WHERE t.user_id = :user_id
+        """
+        parameters: dict[str, object] = {"user_id": self.user_id}
+        if month:
+            query += " AND to_char(t.transaction_date, 'YYYY-MM') = :month"
+            parameters["month"] = month
+        if account_id:
+            query += " AND t.financial_account_id = :account_id"
+            parameters["account_id"] = account_id
+        if category_id:
+            query += " AND t.category_id = :category_id"
+            parameters["category_id"] = category_id
+        if query_text:
+            query += " AND t.narration ILIKE :query_text"
+            parameters["query_text"] = f"%{query_text.strip()}%"
+        if cursor:
+            cursor_date, cursor_id = _decode_transaction_cursor(cursor)
+            query += " AND (t.transaction_date, t.id) < (:cursor_date, :cursor_id)"
+            parameters.update({"cursor_date": cursor_date, "cursor_id": cursor_id})
+        requested_limit = min(max(limit, 1), 200)
+        parameters["limit"] = requested_limit + 1
+        rows = self._rows(query + " ORDER BY t.transaction_date DESC, t.id DESC LIMIT :limit", parameters)
+        has_more = len(rows) > requested_limit
+        items = rows[:requested_limit]
+        next_cursor = None
+        if has_more and items:
+            next_cursor = _encode_transaction_cursor(items[-1]["transaction_date"], items[-1]["id"])
+        return {"items": items, "next_cursor": next_cursor}
 
     def transaction_evidence(self, transaction_id: UUID) -> list[dict[str, object]]:
         return self._rows(
@@ -453,6 +520,16 @@ _MAPPING_CANDIDATES = {
 def _parse_tabular_upload_with_mapping(
     filename: str, content: bytes, column_mapping: dict[str, str] | None
 ) -> list[dict[str, object]]:
+    normalized_rows, errors = _parse_tabular_upload_with_issues(filename, content, column_mapping)
+    if errors:
+        messages = [f"row {error['ordinal']}: {error['message']}" for error in errors]
+        raise LedgerError("Statement validation failed — " + "; ".join(messages[:10]))
+    return normalized_rows
+
+
+def _parse_tabular_upload_with_issues(
+    filename: str, content: bytes, column_mapping: dict[str, str] | None
+) -> tuple[list[dict[str, object]], list[dict[str, object]]]:
     records = _tabular_records(filename, content)
     if column_mapping:
         required = {"transaction_date", "narration", "debit", "credit"}
@@ -461,15 +538,13 @@ def _parse_tabular_upload_with_mapping(
             raise LedgerError(f"Column mapping is missing: {', '.join(sorted(missing))}")
         records = [_apply_column_mapping(record, column_mapping) for record in records]
     normalized_rows: list[dict[str, object]] = []
-    errors: list[str] = []
+    errors: list[dict[str, object]] = []
     for ordinal, record in enumerate(records, start=2):
         try:
             normalized_rows.append(_normalize_row(record))
         except LedgerError as error:
-            errors.append(f"row {ordinal}: {error}")
-    if errors:
-        raise LedgerError("Statement validation failed — " + "; ".join(errors[:10]))
-    return normalized_rows
+            errors.append({"ordinal": ordinal, "message": str(error)})
+    return normalized_rows, errors
 
 
 def _tabular_records(filename: str, content: bytes) -> list[dict[str, object]]:
@@ -601,3 +676,18 @@ def _required_choice(payload: dict[str, object], key: str, allowed: set[str]) ->
 
 def _safe_filename(value: str) -> str:
     return Path(value).name[:255]
+
+
+def _encode_transaction_cursor(transaction_date: object, transaction_id: object) -> str:
+    value = f"{transaction_date}|{transaction_id}".encode("ascii")
+    return base64.urlsafe_b64encode(value).decode("ascii").rstrip("=")
+
+
+def _decode_transaction_cursor(cursor: str) -> tuple[date, UUID]:
+    try:
+        padded = cursor + "=" * (-len(cursor) % 4)
+        value = base64.urlsafe_b64decode(padded.encode("ascii")).decode("ascii")
+        date_value, id_value = value.split("|", maxsplit=1)
+        return date.fromisoformat(date_value), UUID(id_value)
+    except (ValueError, UnicodeDecodeError, binascii.Error) as error:
+        raise LedgerError("Transaction cursor is invalid") from error

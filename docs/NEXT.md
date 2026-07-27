@@ -16,10 +16,18 @@ starting work. Complete tasks in order and record evidence in `STATUS.md`.
 
 ## Phase 1 — Trustworthy manual ledger
 
-- [ ] **LEDGER-001** Implement production contracts, migrations, accounts, artifacts, and source records.
-- [ ] **LEDGER-002** Implement CSV/XLSX upload, mapping, preview, and confirmation.
-- [ ] **LEDGER-003** Implement transaction ledger, evidence links, categories, and corrections.
-- [ ] **LEDGER-004** Implement duplicate detection, transfers, card payments, and monthly reporting.
+- [x] **LEDGER-001** Implement production contracts, migrations, accounts, artifacts, and source records.
+- [x] **LEDGER-002** Implement CSV/XLSX upload, mapping, preview, and confirmation.
+- [x] **LEDGER-003** Implement transaction ledger, evidence links, categories, and corrections.
+- [x] **LEDGER-004** Implement duplicate detection, transfers, card payments, and monthly reporting.
+
+## Phase 2 — Gmail automation
+
+- [ ] **GMAIL-001** Persist Gmail mailbox connections, encrypted OAuth credentials, and mailbox-local synchronization cursors in the application backend.
+- [ ] **GMAIL-002** Implement the asynchronous Gmail synchronization workflow, including Sync Now, incremental history retrieval, idempotent source-artifact persistence, and recoverable job state.
+- [ ] **GMAIL-003** Implement the initial ICICI transaction-alert adapter using sanitized fixtures and a parser-review queue for unsupported messages.
+- [ ] **GMAIL-004** Implement the initial HDFC transaction-alert adapter, parser metrics, and safe failure reporting.
+- [ ] **GMAIL-005** Add scheduled mailbox synchronization and user-visible run history after on-demand synchronization is reliable.
 
 ## Update protocol
 

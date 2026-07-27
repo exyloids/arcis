@@ -2,11 +2,43 @@
 
 ## Current phase
 
-Foundation — feasibility and delivery baseline
+Phase 2 — Gmail automation
 
 ## Current task
 
-FOUNDATION-003B — Real Gmail-provider validation
+GMAIL-001 — Persisted mailbox connections and encrypted OAuth credentials.
+
+The manual-ledger milestone is complete. Real Gmail-provider validation remains
+an external configuration gate, requiring two configured Google test mailboxes.
+
+## Phase 1 — Trustworthy manual ledger
+
+- Implemented user-owned financial accounts, categories, statement imports,
+  immutable source artifacts and source records, canonical transactions, and
+  transaction-to-evidence links.
+- CSV/XLSX imports support header inspection, suggested or explicit mappings,
+  bounded file parsing, row-level validation messages, preview, confirmation,
+  cancellation, and idempotent replay for the same account and content.
+- The ledger supports account, category, month, and narration filters; manual
+  category corrections; evidence inspection; and opaque keyset pagination.
+- Import classification keeps salary-like credits as income and identifies
+  transfers, card payments, cash withdrawals, refunds, and expenses so card
+  bill payments do not become duplicate spending.
+- Monthly reporting aggregates income, expenses, and category totals from
+  canonical transactions.
+
+Verification completed on 2026-07-27:
+
+```bash
+.venv/bin/ruff check apps packages migrations scripts spikes tests
+.venv/bin/python -m unittest discover -s tests -p 'test_*.py' -v
+make test-integration
+(cd apps/web && npm run build)
+```
+
+Result: lint passed; 38 unit tests passed (5 database tests are skipped by
+the generic suite); the dedicated PostgreSQL integration suite passed 5/5;
+and the Next.js production build passed.
 
 The deterministic two-mailbox proof is complete. The remaining foundation
 gate needs two Google test mailboxes and a locally configured Google OAuth
