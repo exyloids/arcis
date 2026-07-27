@@ -35,7 +35,9 @@ class ManualLedgerPostgresTests(unittest.TestCase):
     def test_preview_confirm_replay_and_monthly_report(self) -> None:
         preview = self.service.stage_import(self.account["id"], "statement.csv", self.content)
         import_id = preview["import"]["id"]
+        repeated_preview = self.service.stage_import(self.account["id"], "statement.csv", self.content)
         self.assertEqual(len(preview["rows"]), 2)
+        self.assertEqual(repeated_preview["import"]["id"], import_id)
 
         confirmed = self.service.confirm_import(import_id)
         replay = self.service.confirm_import(import_id)

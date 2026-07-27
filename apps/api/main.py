@@ -1,12 +1,13 @@
+import json
 from datetime import UTC, datetime
 from uuid import UUID
 
 from arcis_backend import __version__
-from arcis_backend.ledger import LedgerError, LedgerService, database_engine
+from arcis_backend.ledger import LedgerError, LedgerService, database_engine, inspect_tabular_upload
 from arcis_backend.settings import get_settings
 from arcis_backend.storage import MinioArtifactStorage
 from arcis_contracts.health import HealthResponse, ReadinessResponse
-from fastapi import FastAPI, File, HTTPException, Query, UploadFile
+from fastapi import FastAPI, File, Form, HTTPException, Query, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 
 settings = get_settings()
@@ -98,6 +99,7 @@ def create_category(payload: dict[str, object]) -> dict[str, object]:
 async def create_import(
     account_id: UUID,
     file: UploadFile = File(...),
+    column_mapping: str | None = Form(default=None),
 ) -> dict[str, object]:
     try:
         content = await file.read()
@@ -106,13 +108,35 @@ async def create_import(
         filename = file.filename or "statement.csv"
         if not filename.lower().endswith((".csv", ".xlsx")):
             raise LedgerError("Only CSV and XLSX statement imports are supported")
-        return ledger.stage_import(account_id, filename, content)
+        try:
+            mapping = json.loads(column_mapping) if column_mapping else None
+        except json.JSONDecodeError as error:
+            raise LedgerError("Column mapping is not valid JSON") from error
+        if mapping is not None and not isinstance(mapping, dict):
+            raise LedgerError("Column mapping must be a JSON object")
+        return ledger.stage_import(account_id, filename, content, mapping)
+    except LedgerError as error:
+        raise ledger_error(error) from error
+
+
+@app.post("/api/v1/imports/inspect", tags=["imports"])
+async def inspect_import(file: UploadFile = File(...)) -> dict[str, object]:
+    try:
+        return inspect_tabular_upload(file.filename or "statement.csv", await file.read())
     except LedgerError as error:
         raise ledger_error(error) from error
 
 
 @app.get("/api/v1/imports/{import_id}/preview", tags=["imports"])
 def preview_import(import_id: UUID) -> dict[str, object]:
+    try:
+        return ledger.import_preview(import_id)
+    except LedgerError as error:
+        raise HTTPException(status_code=404, detail=str(error)) from error
+
+
+@app.get("/api/v1/imports/{import_id}", tags=["imports"])
+def get_import(import_id: UUID) -> dict[str, object]:
     try:
         return ledger.import_preview(import_id)
     except LedgerError as error:
@@ -141,8 +165,21 @@ def cancel_import(import_id: UUID) -> None:
 
 
 @app.get("/api/v1/transactions", tags=["ledger"])
-def list_transactions(month: str | None = Query(default=None, pattern=r"^\d{4}-\d{2}$")) -> list[dict[str, object]]:
-    return ledger.list_transactions(month=month)
+def list_transactions(
+    month: str | None = Query(default=None, pattern=r"^\d{4}-\d{2}$"),
+    account_id: UUID | None = None,
+    category_id: UUID | None = None,
+    q: str | None = Query(default=None, min_length=1, max_length=100),
+    limit: int = Query(default=100, ge=1, le=200),
+) -> list[dict[str, object]]:
+    return ledger.list_transactions(
+        month=month, account_id=account_id, category_id=category_id, query_text=q, limit=limit
+    )
+
+
+@app.get("/api/v1/transactions/{transaction_id}/evidence", tags=["ledger"])
+def get_transaction_evidence(transaction_id: UUID) -> list[dict[str, object]]:
+    return ledger.transaction_evidence(transaction_id)
 
 
 @app.patch("/api/v1/transactions/{transaction_id}", tags=["ledger"])

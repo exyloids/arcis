@@ -15,8 +15,16 @@ type Transaction = {
   account_name: string;
   category: string | null;
 };
-type Preview = { import: { id: string; filename: string; row_count: number }; rows: Transaction[] };
+type Preview = { import: { id: string; filename: string; row_count: number; state: string }; rows: Transaction[] };
 type Report = { income: string; expense: string; categories: Array<{ category: string; amount: string }> };
+type ImportItem = { id: string; filename: string; state: string; row_count: number; duplicate_count: number; created_at: string; confirmed_at: string | null };
+type Inspection = { headers: string[]; suggested_mapping: Record<string, string>; sample_row_count: number };
+type Mapping = Record<string, string>;
+const mappingFields: Array<[keyof Mapping, string, boolean]> = [
+  ["transaction_date", "Transaction date", true], ["posted_date", "Posted date", false],
+  ["narration", "Narration", true], ["debit", "Debit amount", true],
+  ["credit", "Credit amount", true], ["provider_reference", "Reference", false],
+];
 
 async function request<T>(path: string, options?: RequestInit): Promise<T> {
   const response = await fetch(`${API_URL}${path}`, { ...options, cache: "no-store" });
@@ -32,20 +40,25 @@ export default function HomePage() {
   const [transactions, setTransactions] = useState<Transaction[]>([]);
   const [preview, setPreview] = useState<Preview | null>(null);
   const [report, setReport] = useState<Report | null>(null);
+  const [imports, setImports] = useState<ImportItem[]>([]);
+  const [inspection, setInspection] = useState<Inspection | null>(null);
+  const [mapping, setMapping] = useState<Mapping>({});
   const [accountId, setAccountId] = useState("");
   const [file, setFile] = useState<File | null>(null);
   const [message, setMessage] = useState("");
   const month = new Date().toISOString().slice(0, 7);
 
   async function refresh() {
-    const [nextAccounts, nextTransactions, nextReport] = await Promise.all([
+    const [nextAccounts, nextTransactions, nextReport, nextImports] = await Promise.all([
       request<Account[]>("/api/v1/financial-accounts"),
       request<Transaction[]>(`/api/v1/transactions?month=${month}`),
       request<Report>(`/api/v1/reports/monthly?month=${month}`),
+      request<ImportItem[]>("/api/v1/imports"),
     ]);
     setAccounts(nextAccounts);
     setTransactions(nextTransactions);
     setReport(nextReport);
+    setImports(nextImports);
     if (!accountId && nextAccounts[0]) setAccountId(nextAccounts[0].id);
   }
 
@@ -65,13 +78,26 @@ export default function HomePage() {
     } catch (error) { setMessage((error as Error).message); }
   }
 
-  async function upload(event: FormEvent<HTMLFormElement>) {
+  async function inspectFile(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (!accountId || !file) return setMessage("Select an account and CSV/XLSX statement.");
     const body = new FormData(); body.append("file", file);
     try {
+      const result = await request<Inspection>("/api/v1/imports/inspect", { method: "POST", body });
+      setInspection(result); setMapping(result.suggested_mapping);
+      setMessage(`Found ${result.sample_row_count} rows. Review the column mapping before creating a preview.`);
+    } catch (error) { setMessage((error as Error).message); }
+  }
+
+  async function createPreview() {
+    if (!accountId || !file) return;
+    const missing = mappingFields.filter(([field, , required]) => required && !mapping[field]);
+    if (missing.length) return setMessage(`Map required columns: ${missing.map(([, label]) => label).join(", ")}.`);
+    const body = new FormData(); body.append("file", file);
+    body.append("column_mapping", JSON.stringify(Object.fromEntries(Object.entries(mapping).filter(([, value]) => value))));
+    try {
       const result = await request<Preview>(`/api/v1/imports?account_id=${accountId}`, { method: "POST", body });
-      setPreview(result); setMessage("Review the parsed rows before confirmation.");
+      setPreview(result); setInspection(null); setMessage("Review the parsed rows before confirmation.");
     } catch (error) { setMessage((error as Error).message); }
   }
 
@@ -81,6 +107,22 @@ export default function HomePage() {
       const result = await request<{ created: number; duplicates: number }>(`/api/v1/imports/${preview.import.id}/confirm`, { method: "POST" });
       setMessage(`Import confirmed: ${result.created} transactions created, ${result.duplicates} duplicates ignored.`);
       setPreview(null); setFile(null); await refresh();
+    } catch (error) { setMessage((error as Error).message); }
+  }
+
+  async function cancelImport(importId: string) {
+    try {
+      await request<void>(`/api/v1/imports/${importId}/cancel`, { method: "POST" });
+      if (preview?.import.id === importId) setPreview(null);
+      setMessage("Import cancelled and its staged document removed.");
+      await refresh();
+    } catch (error) { setMessage((error as Error).message); }
+  }
+
+  async function openImport(importId: string) {
+    try {
+      const result = await request<Preview>(`/api/v1/imports/${importId}`);
+      setPreview(result); setMessage("Viewing stored import preview.");
     } catch (error) { setMessage((error as Error).message); }
   }
 
@@ -96,14 +138,16 @@ export default function HomePage() {
         <select name="account_type" defaultValue="bank_account"><option value="bank_account">Bank account</option><option value="credit_card">Credit card</option></select>
         <input name="currency" defaultValue="INR" required /><button type="submit">Create account</button>
       </form>
-      <form className="card" onSubmit={upload}><h2>Import statement</h2>
+      <form className="card" onSubmit={inspectFile}><h2>Import statement</h2>
         <select value={accountId} onChange={(event) => setAccountId(event.target.value)} required><option value="">Select account</option>{accounts.map((account) => <option key={account.id} value={account.id}>{account.display_name}</option>)}</select>
         <input type="file" accept=".csv,.xlsx" onChange={(event: ChangeEvent<HTMLInputElement>) => setFile(event.target.files?.[0] ?? null)} required />
-        <p className="hint">CSV/XLSX only · maximum 10 MiB</p><button type="submit">Preview import</button>
+        <p className="hint">CSV/XLSX only · maximum 10 MiB</p><button type="submit">Inspect columns</button>
       </form>
       <section className="card"><h2>This month</h2><p className="metric">Income ₹{report?.income ?? "0"}</p><p className="metric expense">Expense ₹{report?.expense ?? "0"}</p></section>
     </section>
-    {preview && <section className="card wide"><h2>Import preview · {preview.import.filename}</h2><p>{preview.import.row_count} rows will be recorded as source evidence.</p><LedgerTable transactions={preview.rows} /><button onClick={confirmImport}>Confirm import</button></section>}
+    {inspection && <section className="card wide"><h2>Column mapping · {file?.name}</h2><p>Review the detected columns before parsing the statement.</p><div className="mapping-grid">{mappingFields.map(([field, label, required]) => <label key={field}>{label}{required ? " *" : ""}<select value={mapping[field] ?? ""} onChange={(event) => setMapping({ ...mapping, [field]: event.target.value })}><option value="">{required ? "Select column" : "Not available"}</option>{inspection.headers.map((header) => <option key={header} value={header}>{header}</option>)}</select></label>)}</div><button onClick={() => void createPreview()}>Create preview</button></section>}
+    {preview && <section className="card wide"><h2>Import preview · {preview.import.filename}</h2><p>{preview.import.row_count} rows were parsed from this source evidence.</p><LedgerTable transactions={preview.rows} />{preview.import.state === "preview_ready" && <button onClick={confirmImport}>Confirm import</button>}</section>}
+    <section className="card wide"><h2>Import history</h2>{imports.length ? <div className="table-wrap"><table><thead><tr><th>File</th><th>Status</th><th>Rows</th><th>Duplicates</th><th>Created</th><th>Action</th></tr></thead><tbody>{imports.map((item) => <tr key={item.id}><td>{item.filename}</td><td><span className={`state ${item.state}`}>{item.state.replaceAll("_", " ")}</span></td><td>{item.row_count}</td><td>{item.duplicate_count}</td><td>{new Date(item.created_at).toLocaleString()}</td><td><button className="secondary" onClick={() => void openImport(item.id)}>View</button>{item.state === "preview_ready" && <button className="secondary" onClick={() => void cancelImport(item.id)}>Cancel</button>}</td></tr>)}</tbody></table></div> : <p className="hint">No imports yet.</p>}</section>
     <section className="card wide"><h2>Transactions · {month}</h2><LedgerTable transactions={transactions} /></section>
   </main>;
 }

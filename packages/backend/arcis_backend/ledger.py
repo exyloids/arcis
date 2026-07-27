@@ -136,14 +136,24 @@ class LedgerService:
         return self._one("SELECT * FROM categories WHERE id = :id", {"id": category_id})
 
     def stage_import(
-        self, account_id: UUID, filename: str, content: bytes
+        self, account_id: UUID, filename: str, content: bytes, column_mapping: dict[str, str] | None = None
     ) -> dict[str, object]:
         self._require_account(account_id)
-        rows = _parse_tabular_upload(filename, content)
+        rows = _parse_tabular_upload_with_mapping(filename, content, column_mapping)
         if not rows:
             raise LedgerError("The uploaded statement has no transaction rows")
         import_id = uuid4()
         content_hash = hashlib.sha256(content).hexdigest()
+        with Session(self.engine) as session:
+            existing_import_id = session.execute(
+                text(
+                    """SELECT id FROM imports WHERE user_id = :user_id
+                    AND financial_account_id = :account_id AND content_sha256 = :content_sha256"""
+                ),
+                {"user_id": self.user_id, "account_id": account_id, "content_sha256": content_hash},
+            ).scalar_one_or_none()
+        if existing_import_id is not None:
+            return self.import_preview(existing_import_id)
         stored = None
         if self.storage is not None:
             stored = self.storage.put(self.user_id, import_id, _safe_filename(filename), content)
@@ -316,7 +326,15 @@ class LedgerService:
             )
         return {"created": created, "duplicates": duplicates, "confirmed": 1}
 
-    def list_transactions(self, *, month: str | None = None) -> list[dict[str, object]]:
+    def list_transactions(
+        self,
+        *,
+        month: str | None = None,
+        account_id: UUID | None = None,
+        category_id: UUID | None = None,
+        query_text: str | None = None,
+        limit: int = 100,
+    ) -> list[dict[str, object]]:
         query = """
             SELECT t.id, t.financial_account_id, a.display_name AS account_name, t.transaction_date,
                    t.posted_date, t.narration, t.amount, t.currency, t.direction, t.transaction_kind,
@@ -329,7 +347,29 @@ class LedgerService:
         if month:
             query += " AND to_char(t.transaction_date, 'YYYY-MM') = :month"
             parameters["month"] = month
-        return self._rows(query + " ORDER BY t.transaction_date DESC, t.created_at DESC", parameters)
+        if account_id:
+            query += " AND t.financial_account_id = :account_id"
+            parameters["account_id"] = account_id
+        if category_id:
+            query += " AND t.category_id = :category_id"
+            parameters["category_id"] = category_id
+        if query_text:
+            query += " AND t.narration ILIKE :query_text"
+            parameters["query_text"] = f"%{query_text.strip()}%"
+        parameters["limit"] = min(max(limit, 1), 200)
+        return self._rows(query + " ORDER BY t.transaction_date DESC, t.created_at DESC LIMIT :limit", parameters)
+
+    def transaction_evidence(self, transaction_id: UUID) -> list[dict[str, object]]:
+        return self._rows(
+            """SELECT sr.id AS source_record_id, sr.source_record_key, sr.transaction_date, sr.narration,
+            sr.amount, sr.currency, sr.direction, sr.provider_reference, sa.kind AS artifact_kind,
+            i.id AS import_id, i.filename AS import_filename
+            FROM transaction_evidence te JOIN source_records sr ON sr.id = te.source_record_id
+            JOIN source_artifacts sa ON sa.id = sr.artifact_id
+            LEFT JOIN imports i ON i.id = sa.import_id
+            WHERE te.transaction_id = :transaction_id AND sr.user_id = :user_id""",
+            {"transaction_id": transaction_id, "user_id": self.user_id},
+        )
 
     def update_transaction(self, transaction_id: UUID, payload: dict[str, object]) -> dict[str, object]:
         fields: list[str] = []
@@ -384,20 +424,95 @@ class LedgerService:
 
 
 def _parse_tabular_upload(filename: str, content: bytes) -> list[dict[str, object]]:
+    return _parse_tabular_upload_with_mapping(filename, content, None)
+
+
+def inspect_tabular_upload(filename: str, content: bytes) -> dict[str, object]:
+    records = _tabular_records(filename, content)
+    headers = list(records[0]) if records else []
+    normalized_headers = {header.strip().lower(): header for header in headers}
+    suggestions = {
+        field: normalized_headers[candidate]
+        for field, candidates in _MAPPING_CANDIDATES.items()
+        for candidate in candidates
+        if candidate in normalized_headers
+    }
+    return {"headers": headers, "suggested_mapping": suggestions, "sample_row_count": len(records)}
+
+
+_MAPPING_CANDIDATES = {
+    "transaction_date": ("transaction date", "date", "txn date"),
+    "posted_date": ("value date", "value dt", "posted date"),
+    "narration": ("transaction remarks", "narration", "description", "particulars"),
+    "provider_reference": ("reference no.", "ref no", "chq./ref.no.", "utr"),
+    "debit": ("withdrawal amount", "withdrawal amt.", "debit"),
+    "credit": ("deposit amount", "deposit amt.", "credit"),
+}
+
+
+def _parse_tabular_upload_with_mapping(
+    filename: str, content: bytes, column_mapping: dict[str, str] | None
+) -> list[dict[str, object]]:
+    records = _tabular_records(filename, content)
+    if column_mapping:
+        required = {"transaction_date", "narration", "debit", "credit"}
+        missing = required - set(column_mapping)
+        if missing:
+            raise LedgerError(f"Column mapping is missing: {', '.join(sorted(missing))}")
+        records = [_apply_column_mapping(record, column_mapping) for record in records]
+    normalized_rows: list[dict[str, object]] = []
+    errors: list[str] = []
+    for ordinal, record in enumerate(records, start=2):
+        try:
+            normalized_rows.append(_normalize_row(record))
+        except LedgerError as error:
+            errors.append(f"row {ordinal}: {error}")
+    if errors:
+        raise LedgerError("Statement validation failed — " + "; ".join(errors[:10]))
+    return normalized_rows
+
+
+def _tabular_records(filename: str, content: bytes) -> list[dict[str, object]]:
     suffix = Path(filename).suffix.lower()
     if suffix == ".csv":
-        records = list(csv.DictReader(io.StringIO(content.decode("utf-8-sig"))))
+        if b"\x00" in content:
+            raise LedgerError("CSV contains unsupported binary data")
+        try:
+            decoded = content.decode("utf-8-sig")
+        except UnicodeDecodeError as error:
+            raise LedgerError("CSV must be UTF-8 encoded") from error
+        return list(csv.DictReader(io.StringIO(decoded)))
     elif suffix == ".xlsx":
+        if not content.startswith(b"PK"):
+            raise LedgerError("XLSX file signature is invalid")
         workbook = load_workbook(io.BytesIO(content), read_only=True, data_only=True)
+        if len(workbook.sheetnames) > 10:
+            raise LedgerError("XLSX workbook has too many sheets")
         worksheet = workbook.active
         values = list(worksheet.iter_rows(values_only=True))
+        if len(values) > 100_001:
+            raise LedgerError("XLSX worksheet has too many rows")
         if not values:
             return []
         headers = [str(value or "").strip() for value in values[0]]
-        records = [dict(zip(headers, row, strict=True)) for row in values[1:] if any(row)]
+        return [dict(zip(headers, row, strict=True)) for row in values[1:] if any(row)]
     else:
         raise LedgerError("Only CSV and XLSX statement imports are supported")
-    return [_normalize_row(record) for record in records]
+
+
+def _apply_column_mapping(record: dict[str, object], mapping: dict[str, str]) -> dict[str, object]:
+    available = {str(key): value for key, value in record.items()}
+    missing = [header for header in mapping.values() if header not in available]
+    if missing:
+        raise LedgerError(f"Mapped statement columns were not found: {', '.join(sorted(missing))}")
+    return {
+        "Transaction Date": available[mapping["transaction_date"]],
+        "Value Date": available[mapping["posted_date"]] if mapping.get("posted_date") else None,
+        "Transaction Remarks": available[mapping["narration"]],
+        "Withdrawal Amount": available[mapping["debit"]],
+        "Deposit Amount": available[mapping["credit"]],
+        "Reference No.": available[mapping["provider_reference"]] if mapping.get("provider_reference") else None,
+    }
 
 
 def _normalize_row(raw: dict[str, object]) -> dict[str, object]:
