@@ -20,6 +20,8 @@ from openpyxl import load_workbook
 from sqlalchemy import Engine, create_engine, text
 from sqlalchemy.orm import Session
 
+from arcis_backend.storage import MinioArtifactStorage
+
 DEFAULT_CATEGORIES = (
     ("food_dining", "Food and Dining"),
     ("groceries", "Groceries"),
@@ -44,9 +46,10 @@ def database_engine(database_url: str) -> Engine:
 
 
 class LedgerService:
-    def __init__(self, engine: Engine, user_id: UUID) -> None:
+    def __init__(self, engine: Engine, user_id: UUID, storage: MinioArtifactStorage | None = None) -> None:
         self.engine = engine
         self.user_id = user_id
+        self.storage = storage
 
     def initialize_user(self) -> None:
         with Session(self.engine) as session, session.begin():
@@ -54,11 +57,11 @@ class LedgerService:
                 text(
                     """
                     INSERT INTO users (id, email_normalized, display_name)
-                    VALUES (:id, 'local@arcis.invalid', 'Local Arcis User')
+                    VALUES (:id, :email, 'Local Arcis User')
                     ON CONFLICT (id) DO NOTHING
                     """
                 ),
-                {"id": self.user_id},
+                {"id": self.user_id, "email": f"local-{self.user_id}@arcis.invalid"},
             )
             for code, name in DEFAULT_CATEGORIES:
                 session.execute(
@@ -141,13 +144,17 @@ class LedgerService:
             raise LedgerError("The uploaded statement has no transaction rows")
         import_id = uuid4()
         content_hash = hashlib.sha256(content).hexdigest()
+        stored = None
+        if self.storage is not None:
+            stored = self.storage.put(self.user_id, import_id, _safe_filename(filename), content)
         with Session(self.engine) as session, session.begin():
             session.execute(
                 text(
                     """
                     INSERT INTO imports (id, user_id, financial_account_id, filename, content_sha256, state,
-                                         row_count)
-                    VALUES (:id, :user_id, :account_id, :filename, :content_sha256, 'preview_ready', :row_count)
+                                         row_count, object_key, detected_mime_type, byte_size)
+                    VALUES (:id, :user_id, :account_id, :filename, :content_sha256, 'preview_ready', :row_count,
+                            :object_key, :detected_mime_type, :byte_size)
                     """
                 ),
                 {
@@ -157,6 +164,9 @@ class LedgerService:
                     "filename": _safe_filename(filename),
                     "content_sha256": content_hash,
                     "row_count": len(rows),
+                    "object_key": stored.object_key if stored else None,
+                    "detected_mime_type": stored.content_type if stored else None,
+                    "byte_size": stored.byte_size if stored else len(content),
                 },
             )
             for ordinal, row in enumerate(rows, start=1):
@@ -193,6 +203,23 @@ class LedgerService:
             confirmed_at, created_at FROM imports WHERE user_id = :user_id ORDER BY created_at DESC"""
         )
 
+    def cancel_import(self, import_id: UUID) -> None:
+        with Session(self.engine) as session, session.begin():
+            imported = session.execute(
+                text("SELECT state, object_key FROM imports WHERE id = :id AND user_id = :user_id FOR UPDATE"),
+                {"id": import_id, "user_id": self.user_id},
+            ).mappings().one_or_none()
+            if imported is None:
+                raise LedgerError("Import was not found")
+            if imported["state"] == "confirmed":
+                raise LedgerError("Confirmed imports cannot be cancelled")
+            session.execute(
+                text("UPDATE imports SET state = 'cancelled', cancelled_at = now() WHERE id = :id"),
+                {"id": import_id},
+            )
+        if imported["object_key"] and self.storage is not None:
+            self.storage.delete(imported["object_key"])
+
     def confirm_import(self, import_id: UUID) -> dict[str, int]:
         with Session(self.engine) as session, session.begin():
             imported = session.execute(
@@ -205,17 +232,20 @@ class LedgerService:
                 raise LedgerError("Import was not found")
             if imported["state"] == "confirmed":
                 return {"created": 0, "duplicates": imported["duplicate_count"], "confirmed": 1}
+            if imported["state"] != "preview_ready":
+                raise LedgerError(f"Import cannot be confirmed from state {imported['state']}")
             artifact_id = uuid4()
             session.execute(
                 text(
                     """
                     INSERT INTO source_artifacts (id, user_id, kind, content_sha256, detected_mime_type,
-                                                  lifecycle_state, import_id)
-                    VALUES (:id, :user_id, 'manual_upload', :content_sha256, 'text/tabular', 'active', :import_id)
+                                                  lifecycle_state, import_id, object_key, byte_size)
+                    VALUES (:id, :user_id, 'manual_upload', :content_sha256, 'text/tabular', 'active', :import_id,
+                            :object_key, :byte_size)
                     ON CONFLICT (user_id, kind, content_sha256) DO NOTHING
                     """
                 ),
-                {"id": artifact_id, "user_id": self.user_id, "content_sha256": imported["content_sha256"], "import_id": import_id},
+                {"id": artifact_id, "user_id": self.user_id, "content_sha256": imported["content_sha256"], "import_id": import_id, "object_key": imported["object_key"], "byte_size": imported["byte_size"]},
             )
             artifact = session.execute(
                 text("SELECT id FROM source_artifacts WHERE user_id = :user_id AND kind = 'manual_upload' "
@@ -423,6 +453,8 @@ def _date(value: object | None, *, optional: bool = False) -> date | None:
 
 def _transaction_kind(narration: str) -> str:
     upper = narration.upper()
+    if any(marker in upper for marker in ("SALARY", "INTEREST", "DIVIDEND")):
+        return "income"
     if any(marker in upper for marker in ("CARD PAYMENT", "CC PAYMENT", "CREDIT CARD PAYMENT")):
         return "credit_card_payment"
     if any(marker in upper for marker in ("NEFT", "IMPS", "RTGS", "TRANSFER")):

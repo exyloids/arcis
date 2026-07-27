@@ -63,6 +63,8 @@ services:
       ARCIS_REDIS_URL: redis://redis:6379/0
       ARCIS_OBJECT_STORAGE_ENDPOINT: http://minio:9000
       ARCIS_OBJECT_STORAGE_BUCKET: arcis-local
+      ARCIS_OBJECT_STORAGE_ACCESS_KEY: arcis-local
+      ARCIS_OBJECT_STORAGE_SECRET_KEY: change-me-local
     ports:
       - "8000:8000"
     depends_on:

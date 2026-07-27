@@ -4,8 +4,10 @@ from uuid import UUID
 from arcis_backend import __version__
 from arcis_backend.ledger import LedgerError, LedgerService, database_engine
 from arcis_backend.settings import get_settings
+from arcis_backend.storage import MinioArtifactStorage
 from arcis_contracts.health import HealthResponse, ReadinessResponse
 from fastapi import FastAPI, File, HTTPException, Query, UploadFile
+from fastapi.middleware.cors import CORSMiddleware
 
 settings = get_settings()
 app = FastAPI(
@@ -13,8 +15,24 @@ app = FastAPI(
     version=__version__,
     description="Read-only personal finance tracker API",
 )
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost:3000", "http://127.0.0.1:3000"],
+    allow_credentials=False,
+    allow_methods=["GET", "POST", "PATCH", "OPTIONS"],
+    allow_headers=["Content-Type"],
+)
 
-ledger = LedgerService(database_engine(settings.database_url), settings.demo_user_id)
+ledger = LedgerService(
+    database_engine(settings.database_url),
+    settings.demo_user_id,
+    MinioArtifactStorage(
+        settings.object_storage_endpoint,
+        settings.object_storage_access_key,
+        settings.object_storage_secret_key,
+        settings.object_storage_bucket,
+    ),
+)
 
 
 @app.on_event("startup")
@@ -112,6 +130,14 @@ def confirm_import(import_id: UUID) -> dict[str, int]:
 @app.get("/api/v1/imports", tags=["imports"])
 def list_imports() -> list[dict[str, object]]:
     return ledger.list_imports()
+
+
+@app.post("/api/v1/imports/{import_id}/cancel", status_code=204, tags=["imports"])
+def cancel_import(import_id: UUID) -> None:
+    try:
+        ledger.cancel_import(import_id)
+    except LedgerError as error:
+        raise ledger_error(error) from error
 
 
 @app.get("/api/v1/transactions", tags=["ledger"])
