@@ -60,6 +60,8 @@ class CandidateService:
         if state:
             query += " AND state = :state"
             params["state"] = state
+        else:
+            query += " AND state IN ('ready', 'needs_review', 'unsupported')"
         with Session(self.engine) as session:
             return [dict(row) for row in session.execute(text(query + " ORDER BY created_at DESC"), params).mappings()]
 

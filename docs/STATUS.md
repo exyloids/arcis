@@ -2,14 +2,167 @@
 
 ## Current phase
 
-Phase 2 — Gmail automation
+Phase 4 — Finance intelligence
 
 ## Current task
 
-Phase 2 — Gmail automation complete.
+The initial Phase 4 intelligence milestone is complete. The next focus is Home
+screen UX refinement using real data, followed by budgets and reminders.
+
+## Phase 4 monthly insights
+
+- Added deterministic monthly spending forecasts that extrapolate observed
+  eligible debit spend to the end of the selected calendar month.
+- Added evidence-linked anomaly facts for unusually large transactions and
+  category spending spikes versus the prior month. Each result includes the
+  supporting transaction or category calculation; no LLM is used to invent a
+  conclusion.
+- Added the Home-screen Monthly insights card, which presents the forecast and
+  the top evidence-linked findings.
+
+Verification completed on 2026-07-28:
+
+```bash
+.venv/bin/ruff check apps/api/main.py packages/backend/arcis_backend/ledger.py
+(cd apps/web && npm run build)
+.venv/bin/python -m unittest discover -s tests -p 'test_*.py' -v
+curl -fsS http://localhost:8000/health
+```
+
+Result: lint passed; frontend production build passed; 57 tests passed with 9
+optional PostgreSQL integration tests skipped; API health returned `status: ok`.
+
+## Phase 4 recurring-payment detection
+
+- Added deterministic recurring-payment detection for consistent weekly,
+  monthly, quarterly, and yearly debit patterns. It requires at least three
+  occurrences, bounded amount variation, and excludes transfers and credit-card
+  bill payments.
+- Detections are persisted as reviewable records with a predicted next date,
+  cadence, typical amount, confidence, and detected/confirmed/dismissed state.
+- The Home screen includes an Upcoming recurring payments card. **Scan** runs
+  detection; each candidate can be confirmed or dismissed without changing the
+  underlying ledger transaction.
+
+Verification completed on 2026-07-28:
+
+```bash
+.venv/bin/ruff check apps/api/main.py packages/backend/arcis_backend/ledger.py \
+  migrations/versions/0012_recurring_payment_detection.py tests/test_recurring_payments.py
+.venv/bin/python -m unittest discover -s tests -p 'test_recurring_payments.py' -v
+(cd apps/web && npm run build)
+docker-compose -f deploy/compose/docker-compose.yml exec -T api alembic upgrade head
+curl -fsS http://localhost:8000/health
+```
+
+Result: lint passed; three cadence tests passed; the production web build
+passed; Alembic applied `0012_recurring_payment_detection`; API health returned
+`status: ok`.
 
 The manual-ledger milestone is complete. Real Gmail-provider validation remains
 an external configuration gate, requiring two configured Google test mailboxes.
+
+## UI visual foundation
+
+- Replaced the single operational page with a dark, card-based, responsive
+  interface inspired by the supplied finance-app references while retaining an
+  original Arcis design and no third-party branding.
+- Added focused Home, Transactions, Accounts, Credit cards, Imports, and
+  Mailboxes views. Desktop uses a sidebar; mobile uses a scrollable top
+  navigation so every workflow remains reachable.
+- Home now prioritizes total bank balance, current-month cash flow, separate
+  credit-card outstanding, spending categories, accounts, cards, recent
+  transactions, and mailbox connection state.
+- Transactions use touch-friendly cards on all screen sizes and retain filters,
+  categorization, evidence access, and transaction detail controls.
+- Replaced the transaction category dropdown with a dedicated Tag transaction
+  sheet. It presents parent categories as groups and selectable subcategories
+  as icon tiles, while transaction cards show only the parent category name.
+- All existing import, reconciliation, Gmail, and account-management actions
+  remain available in their dedicated views. No backend API or data-model
+  boundary changed in this UI milestone.
+
+Verification completed on 2026-07-28:
+
+```bash
+(cd apps/web && npm run build)
+docker-compose -f deploy/compose/docker-compose.yml build web
+docker-compose -f deploy/compose/docker-compose.yml up -d web
+curl -fsS http://localhost:3000/
+```
+
+Result: the Next.js production build passed and the web container served the
+application with the API container healthy.
+
+## Phase 4 initial categorization
+
+- Categories now support parent/child taxonomy, including the user-defined
+  Transport, Food & Drinks, Shopping, and supporting finance categories.
+- Every transaction view presents its source account, date, merchant, incoming
+  or outgoing direction, amount, narration, transaction ID, and reference/UTR
+  when provided by the source.
+- Deterministic categorization evaluates user overrides, exact merchant rules,
+  MCC rules, then ordered keyword rules. Manual category choices are protected
+  from later automated recategorization.
+- Built-in mappings for common merchants are seeded as keyword rules. Statement
+  confirmation runs categorization automatically; the ledger also exposes a
+  user-visible **Categorize transactions** action for existing records.
+- A user can choose a category from a transaction's details and remember that
+  merchant choice. This creates a highest-priority user override with full
+  confidence for matching normalized merchant text.
+
+Verification completed on 2026-07-28:
+
+```bash
+.venv/bin/ruff check apps packages migrations tests
+.venv/bin/python -m unittest discover -s tests -p 'test_*.py' -v
+(cd apps/web && npm run build)
+docker-compose -f deploy/compose/docker-compose.yml run --rm api alembic upgrade head
+docker-compose -f deploy/compose/docker-compose.yml up -d api web
+curl -fsS http://localhost:8000/health
+curl -fsS -X POST http://localhost:8000/api/v1/categories/categorize
+```
+
+Result: lint passed; 54 tests passed (9 optional PostgreSQL integration tests
+skipped without `ARCIS_INTEGRATION_DATABASE_URL`); the Next.js production build
+passed; Alembic reached `0011_category_rules`; API health returned `status: ok`;
+and the live categorization endpoint applied the seeded deterministic rules.
+
+## Phase 3 completion
+
+- Manual PDF statement uploads now create a reviewable preview before they can
+  affect the canonical ledger. The original document is held in private object
+  storage and imports are idempotent per account and document hash.
+- Password-protected PDFs are parsed in a bounded child process. The password
+  travels only over the request body and child-process standard input; it is
+  never persisted, logged, placed in a job payload, or passed on a command line.
+- Gmail ingestion saves PDF attachments as separate private artifacts. The web
+  app exposes them as account-scoped statement previews, with the optional
+  password supplied only at preview time.
+- Initial deterministic ICICI/HDFC PDF recognition extracts transaction rows
+  and common balance/card fields. Unsupported or non-text PDFs fail closed;
+  OCR remains a later adapter rather than silently inventing rows.
+- Confirmation reconciles exact account/direction/amount/date or reference
+  matches automatically, preserves evidence, creates statement-only rows for
+  transactions missed by email alerts, and sends less certain matches to a
+  user decision queue. Rejecting the final candidate creates a statement-only
+  row, so no statement transaction is discarded.
+
+Verification completed on 2026-07-28:
+
+```bash
+.venv/bin/ruff check apps packages migrations tests
+.venv/bin/python -m unittest discover -s tests -p 'test_*.py' -v
+(cd apps/web && npm run build)
+docker-compose -f deploy/compose/docker-compose.yml up --build -d api worker web
+docker-compose -f deploy/compose/docker-compose.yml exec -T api alembic current
+curl -fsS http://localhost:8000/health
+```
+
+Result: lint passed; 48 unit tests passed (9 database integration tests
+skipped without a database URL); the Next.js production build passed; the
+runtime migration was `0008_statements_reconciliation` at that milestone; and
+the API health endpoint returned `status: ok`.
 
 ## GMAIL-001 evidence
 

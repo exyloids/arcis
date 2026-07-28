@@ -9,13 +9,17 @@ from __future__ import annotations
 
 import base64
 import binascii
+import calendar
 import csv
 import hashlib
 import io
 import json
-from datetime import date
+import re
+from collections import defaultdict
+from datetime import date, timedelta
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
+from statistics import median
 from uuid import UUID, uuid4
 
 from openpyxl import load_workbook
@@ -36,6 +40,37 @@ DEFAULT_CATEGORIES = (
     ("cash_withdrawal", "Cash Withdrawal"),
     ("fees_charges", "Fees and Charges"),
     ("other", "Other"),
+)
+
+CATEGORY_TAXONOMY = {
+    "transport": ("Transport", "Uber, Rapido, Auto, Cab, Train, Metro, Bus, Bike, Fuel, EV Recharge, Flights, Parking, FastTag, Tolls, Lounge, Fine"),
+    "food_drinks": ("Food & Drinks", "Eating Out, Take Away, Tea & Coffee, Fast Food, Snacks, Swiggy, Zomato, Sweets, Liquor, Beverages, Date, Pizza, Tiffin"),
+    "shopping": ("Shopping", "Clothes, Footwear, Electronics, Festival, Video Games, Books, Plants, Jewellery, Furniture, Appliances, Utensils, Vehicle, Cosmetics, Toys, Stationery"),
+    "groceries": ("Groceries", "Supermarket, Fruits & Vegetables, Dairy, Meat & Seafood, Household Supplies"),
+    "home": ("Home", "Rent, Maintenance, Repairs, Furnishing, Domestic Help"),
+    "entertainment": ("Entertainment", "Movies, Streaming, Games, Music, Hobbies"),
+    "events": ("Events", "Tickets, Celebrations, Gifts, Conferences"),
+    "travel": ("Travel", "Hotels, Bookings, Visa, Foreign Exchange"),
+    "medical": ("Medical", "Doctor, Pharmacy, Tests, Hospital, Insurance"),
+    "personal": ("Personal", "Salon, Clothing Care, Mobile, Miscellaneous"),
+    "fitness": ("Fitness", "Gym, Sports, Wellness"),
+    "services": ("Services", "Professional, Repairs, Delivery, Government"),
+    "bills": ("Bills", "Electricity, Water, Internet, Mobile, Gas"),
+    "subscriptions": ("Subscriptions", "Software, Streaming, Memberships"),
+    "emi": ("EMI", "Home Loan, Vehicle Loan, Personal Loan"),
+    "credit_bill": ("Credit Bill", "Credit Card Bill Payment"),
+}
+
+BUILTIN_MERCHANT_MAPPINGS = (
+    ("swiggy", "Swiggy", "food_drinks_swiggy"),
+    ("zomato", "Zomato", "food_drinks_zomato"),
+    ("uber", "Uber", "transport_uber"),
+    ("rapido", "Rapido", "transport_rapido"),
+    ("makemytrip", "MakeMyTrip", "transport_flights"),
+    ("indianoil", "IndianOil", "transport_fuel"),
+    ("hpcl", "HP Fuel", "transport_fuel"),
+    ("bpcl", "BP Fuel", "transport_fuel"),
+    ("amazon", "Amazon", "shopping_electronics"),
 )
 
 
@@ -76,6 +111,38 @@ class LedgerService:
                     ),
                     {"id": uuid4(), "user_id": self.user_id, "code": code, "name": name},
                 )
+            for code, (name, children) in CATEGORY_TAXONOMY.items():
+                parent_id = uuid4()
+                session.execute(text("""INSERT INTO categories (id, user_id, code, name, is_system)
+                    VALUES (:id, :user_id, :code, :name, true) ON CONFLICT (user_id, code) DO NOTHING"""),
+                    {"id": parent_id, "user_id": self.user_id, "code": code, "name": name})
+                parent_id = session.execute(text("SELECT id FROM categories WHERE user_id = :user_id AND code = :code"), {"user_id": self.user_id, "code": code}).scalar_one()
+                for child in children.split(", "):
+                    child_code = f"{code}_{child.lower().replace(' & ', '_').replace(' ', '_')}"
+                    session.execute(text("""INSERT INTO categories (id, user_id, code, name, parent_id, is_system)
+                        VALUES (:id, :user_id, :code, :name, :parent_id, true) ON CONFLICT (user_id, code) DO NOTHING"""),
+                        {"id": uuid4(), "user_id": self.user_id, "code": child_code, "name": child, "parent_id": parent_id})
+            self._seed_builtin_merchant_rules(session)
+
+    def _seed_builtin_merchant_rules(self, session: Session) -> None:
+        """Register application-maintained keyword rules once per user."""
+        for pattern, merchant, category_code in BUILTIN_MERCHANT_MAPPINGS:
+            category_id = session.execute(
+                text("SELECT id FROM categories WHERE user_id = :user_id AND code = :code"),
+                {"user_id": self.user_id, "code": category_code},
+            ).scalar_one_or_none()
+            if category_id is None:
+                continue
+            session.execute(
+                text(
+                    """INSERT INTO merchant_rules (id, user_id, match_pattern, merchant_normalized,
+                        category_id, priority, rule_type, confidence)
+                    VALUES (:id, :user_id, :pattern, :merchant, :category_id, 100, 'keyword', 0.9500)
+                    ON CONFLICT (user_id, match_pattern) DO NOTHING"""
+                ),
+                {"id": uuid4(), "user_id": self.user_id, "pattern": pattern, "merchant": merchant,
+                 "category_id": category_id},
+            )
 
     def list_accounts(self) -> list[dict[str, object]]:
         return self._rows(
@@ -117,8 +184,10 @@ class LedgerService:
 
     def list_categories(self) -> list[dict[str, object]]:
         return self._rows(
-            "SELECT id, code, name, is_system, version FROM categories "
-            "WHERE user_id = :user_id AND archived_at IS NULL ORDER BY name"
+            """SELECT c.id, c.code, c.name, c.parent_id, p.name AS parent_name, c.is_system, c.version
+            FROM categories c LEFT JOIN categories p ON p.id = c.parent_id
+            WHERE c.user_id = :user_id AND c.archived_at IS NULL
+            ORDER BY COALESCE(p.name, c.name), c.parent_id NULLS FIRST, c.name"""
         )
 
     def create_category(self, payload: dict[str, object]) -> dict[str, object]:
@@ -136,6 +205,60 @@ class LedgerService:
                 },
             )
         return self._one("SELECT * FROM categories WHERE id = :id", {"id": category_id})
+
+    def list_merchant_rules(self) -> list[dict[str, object]]:
+        return self._rows("""SELECT mr.id, mr.match_pattern, mr.merchant_normalized, mr.priority,
+            mr.category_id, c.name AS category FROM merchant_rules mr LEFT JOIN categories c ON c.id = mr.category_id
+            WHERE mr.user_id = :user_id ORDER BY mr.priority, mr.created_at""")
+
+    def create_merchant_rule(self, payload: dict[str, object]) -> dict[str, object]:
+        rule_id = uuid4()
+        category_id = UUID(str(payload["category_id"])) if payload.get("category_id") else None
+        with Session(self.engine) as session, session.begin():
+            session.execute(text("""INSERT INTO merchant_rules (id, user_id, match_pattern, merchant_normalized, category_id, priority)
+                VALUES (:id, :user_id, :pattern, :merchant, :category_id, :priority)"""),
+                {"id": rule_id, "user_id": self.user_id, "pattern": _required_text(payload, "match_pattern").upper(),
+                 "merchant": _required_text(payload, "merchant_normalized"), "category_id": category_id,
+                 "priority": int(payload.get("priority", 100))})
+        return self._one("SELECT * FROM merchant_rules WHERE id = :id", {"id": rule_id})
+
+    def apply_merchant_rules(self) -> dict[str, int]:
+        return self.categorize_transactions()
+
+    def apply_builtin_categories(self) -> dict[str, int]:
+        return self.categorize_transactions()
+
+    def categorize_transactions(self) -> dict[str, int]:
+        """Apply deterministic rules: override, exact merchant, MCC, then keyword."""
+        with Session(self.engine) as session, session.begin():
+            rules = session.execute(text("""SELECT * FROM merchant_rules WHERE user_id = :user_id
+                ORDER BY CASE rule_type WHEN 'user_override' THEN 1 WHEN 'exact_merchant' THEN 2 WHEN 'mcc' THEN 3 ELSE 4 END,
+                priority, created_at"""), {"user_id": self.user_id}).mappings().all()
+            transactions = session.execute(text("""SELECT id, narration, merchant_normalized, merchant_mcc,
+                category_source FROM transactions WHERE user_id = :user_id"""), {"user_id": self.user_id}).mappings().all()
+            updated = 0
+            for transaction in transactions:
+                if transaction["category_source"] == "manual":
+                    continue
+                merchant = _normalize_merchant(transaction["merchant_normalized"] or transaction["narration"])
+                for rule in rules:
+                    normalized_pattern = _normalize_merchant(rule["match_pattern"])
+                    matched = (
+                        rule["rule_type"] == "mcc" and transaction["merchant_mcc"] == rule["match_pattern"]
+                    ) or (
+                        rule["rule_type"] in {"user_override", "exact_merchant"}
+                        and merchant == normalized_pattern
+                    ) or (
+                        rule["rule_type"] == "keyword" and normalized_pattern in merchant
+                    )
+                    if not matched:
+                        continue
+                    session.execute(text("""UPDATE transactions SET merchant_normalized = :merchant, category_id = :category_id,
+                        category_source = :source, category_rule_id = :rule_id, category_confidence = :confidence, updated_at = now()
+                        WHERE id = :id"""), {"merchant": rule["merchant_normalized"], "category_id": rule["category_id"], "source": rule["rule_type"], "rule_id": rule["id"], "confidence": rule["confidence"], "id": transaction["id"]})
+                    updated += 1
+                    break
+        return {"rules": len(rules), "transactions_updated": updated}
 
     def stage_import(
         self, account_id: UUID, filename: str, content: bytes, column_mapping: dict[str, str] | None = None
@@ -353,14 +476,15 @@ class LedgerService:
         *,
         month: str | None = None,
         account_id: UUID | None = None,
+        account_type: str | None = None,
         category_id: UUID | None = None,
         query_text: str | None = None,
         limit: int = 100,
     ) -> list[dict[str, object]]:
         query = """
             SELECT t.id, t.financial_account_id, a.display_name AS account_name, t.transaction_date,
-                   t.posted_date, t.narration, t.amount, t.currency, t.direction, t.transaction_kind,
-                   t.reconciliation_state, t.category_id, c.name AS category
+                   t.posted_date, t.narration, t.merchant_normalized, t.provider_reference, t.amount, t.currency, t.direction, t.transaction_kind,
+                   t.reconciliation_state, t.category_id, COALESCE(c.name, CASE WHEN t.transaction_kind = 'credit_card_payment' THEN 'Credit Card Bill Payment' END) AS category
             FROM transactions t JOIN financial_accounts a ON a.id = t.financial_account_id
             LEFT JOIN categories c ON c.id = t.category_id
             WHERE t.user_id = :user_id
@@ -372,6 +496,9 @@ class LedgerService:
         if account_id:
             query += " AND t.financial_account_id = :account_id"
             parameters["account_id"] = account_id
+        if account_type:
+            query += " AND a.account_type = :account_type"
+            parameters["account_type"] = account_type
         if category_id:
             query += " AND t.category_id = :category_id"
             parameters["category_id"] = category_id
@@ -386,6 +513,7 @@ class LedgerService:
         *,
         month: str | None = None,
         account_id: UUID | None = None,
+        account_type: str | None = None,
         category_id: UUID | None = None,
         query_text: str | None = None,
         cursor: str | None = None,
@@ -393,8 +521,8 @@ class LedgerService:
     ) -> dict[str, object]:
         query = """
             SELECT t.id, t.financial_account_id, a.display_name AS account_name, t.transaction_date,
-                   t.posted_date, t.narration, t.amount, t.currency, t.direction, t.transaction_kind,
-                   t.reconciliation_state, t.category_id, c.name AS category
+                   t.posted_date, t.narration, t.merchant_normalized, t.provider_reference, t.amount, t.currency, t.direction, t.transaction_kind,
+                   t.reconciliation_state, t.category_id, COALESCE(c.name, CASE WHEN t.transaction_kind = 'credit_card_payment' THEN 'Credit Card Bill Payment' END) AS category
             FROM transactions t JOIN financial_accounts a ON a.id = t.financial_account_id
             LEFT JOIN categories c ON c.id = t.category_id
             WHERE t.user_id = :user_id
@@ -406,6 +534,9 @@ class LedgerService:
         if account_id:
             query += " AND t.financial_account_id = :account_id"
             parameters["account_id"] = account_id
+        if account_type:
+            query += " AND a.account_type = :account_type"
+            parameters["account_type"] = account_type
         if category_id:
             query += " AND t.category_id = :category_id"
             parameters["category_id"] = category_id
@@ -446,7 +577,7 @@ class LedgerService:
                 fields.append(f"{field} = :{field}")
                 parameters[field] = _required_text(payload, field)
         if "category_id" in payload:
-            fields.append("category_id = :category_id")
+            fields.extend(("category_id = :category_id", "category_source = 'manual'", "category_rule_id = NULL", "category_confidence = 1.0"))
             parameters["category_id"] = UUID(str(payload["category_id"])) if payload["category_id"] else None
         if not fields:
             raise LedgerError("No mutable transaction fields were supplied")
@@ -459,6 +590,16 @@ class LedgerService:
             )
             if result.rowcount != 1:
                 raise LedgerError("Transaction was not found")
+            if payload.get("remember_merchant") and payload.get("category_id"):
+                transaction = session.execute(text("SELECT narration, merchant_normalized FROM transactions WHERE id = :id AND user_id = :user_id"), parameters).mappings().one()
+                merchant = _normalize_merchant(transaction["merchant_normalized"] or transaction["narration"])
+                if merchant:
+                    session.execute(text("""INSERT INTO merchant_rules (id, user_id, match_pattern, merchant_normalized,
+                        category_id, priority, rule_type, confidence) VALUES (:id, :user_id, :pattern, :merchant,
+                        :category_id, 1, 'user_override', 1.0) ON CONFLICT (user_id, match_pattern) DO UPDATE
+                        SET category_id = EXCLUDED.category_id, merchant_normalized = EXCLUDED.merchant_normalized,
+                        rule_type = 'user_override', confidence = 1.0, priority = 1, updated_at = now()"""),
+                        {"id": uuid4(), "user_id": self.user_id, "pattern": merchant, "merchant": transaction["merchant_normalized"] or transaction["narration"], "category_id": UUID(str(payload["category_id"]))})
         return self._one("SELECT * FROM transactions WHERE id = :id", {"id": transaction_id})
 
     def monthly_report(self, month: str) -> dict[str, object]:
@@ -474,6 +615,171 @@ class LedgerService:
         for row in rows:
             totals["expense" if row["direction"] == "debit" else "income"] += row["amount"]
         return {"month": month, "income": totals["income"], "expense": totals["expense"], "categories": rows}
+
+    def monthly_insights(self, month: str) -> dict[str, object]:
+        """Return deterministic, evidence-linked month insights.
+
+        This intentionally contains facts and calculations only. Presentation or
+        an LLM may explain these results later, but cannot create new anomalies.
+        """
+        year, month_number = (int(part) for part in month.split("-"))
+        month_start = date(year, month_number, 1)
+        month_end = date(year, month_number, calendar.monthrange(year, month_number)[1])
+        previous_end = month_start - timedelta(days=1)
+        previous_start = date(previous_end.year, previous_end.month, 1)
+        rows = self._rows(
+            """SELECT t.id, t.transaction_date, t.narration, t.merchant_normalized, t.amount,
+                       COALESCE(c.name, 'Uncategorized') AS category
+                FROM transactions t LEFT JOIN categories c ON c.id = t.category_id
+                WHERE t.user_id = :user_id AND t.direction = 'debit'
+                  AND t.transaction_kind NOT IN ('transfer', 'credit_card_payment')
+                  AND t.transaction_date BETWEEN :start AND :end
+                ORDER BY t.transaction_date""",
+            {"user_id": self.user_id, "start": month_start, "end": month_end},
+        )
+        previous_categories = self._rows(
+            """SELECT COALESCE(c.name, 'Uncategorized') AS category, SUM(t.amount) AS amount
+                FROM transactions t LEFT JOIN categories c ON c.id = t.category_id
+                WHERE t.user_id = :user_id AND t.direction = 'debit'
+                  AND t.transaction_kind NOT IN ('transfer', 'credit_card_payment')
+                  AND t.transaction_date BETWEEN :start AND :end
+                GROUP BY c.name""",
+            {"user_id": self.user_id, "start": previous_start, "end": previous_end},
+        )
+        if not rows:
+            return {"month": month, "expense": Decimal("0"), "forecast": None, "anomalies": []}
+        expense = sum((Decimal(str(row["amount"])) for row in rows), Decimal("0"))
+        typical_amount = Decimal(str(median([Decimal(str(row["amount"])) for row in rows])))
+        anomaly_floor = max(Decimal("5000"), typical_amount * Decimal("3"))
+        anomalies: list[dict[str, object]] = []
+        for row in rows:
+            amount = Decimal(str(row["amount"]))
+            if amount >= anomaly_floor:
+                anomalies.append({"kind": "large_transaction", "title": "Unusually large transaction", "amount": amount,
+                                  "transaction_id": row["id"], "transaction_date": row["transaction_date"],
+                                  "merchant": row["merchant_normalized"] or row["narration"], "category": row["category"],
+                                  "reason": "Amount is at least three times the typical transaction amount this month."})
+        current_categories: dict[str, Decimal] = defaultdict(lambda: Decimal("0"))
+        for row in rows:
+            current_categories[str(row["category"])] += Decimal(str(row["amount"]))
+        previous_by_category = {str(row["category"]): Decimal(str(row["amount"])) for row in previous_categories}
+        for category, amount in current_categories.items():
+            previous = previous_by_category.get(category, Decimal("0"))
+            if previous >= Decimal("1000") and amount >= previous * Decimal("1.5"):
+                support = [row["id"] for row in rows if row["category"] == category]
+                anomalies.append({"kind": "category_spike", "title": f"{category} spending increased", "amount": amount,
+                                  "transaction_ids": support, "category": category,
+                                  "reason": f"{category} is {((amount / previous) - 1) * 100:.0f}% higher than the prior month."})
+        elapsed_days = max(1, min((max(row["transaction_date"] for row in rows) - month_start).days + 1, month_end.day))
+        forecast = (expense / Decimal(elapsed_days) * Decimal(month_end.day)).quantize(Decimal("0.01"))
+        return {"month": month, "expense": expense, "forecast": {"projected_expense": forecast, "days_observed": elapsed_days, "days_in_month": month_end.day}, "anomalies": anomalies[:10]}
+
+    def detect_recurring_payments(self) -> dict[str, int]:
+        """Persist only high-signal recurring debit patterns for user review.
+
+        The detector is intentionally deterministic: an account/merchant pair needs
+        three observations, a recognised cadence, and a bounded amount variation.
+        """
+        rows = self._rows(
+            """SELECT t.financial_account_id, t.transaction_date, t.amount, t.narration,
+                       t.merchant_normalized, t.category_id
+                FROM transactions t
+                WHERE t.user_id = :user_id AND t.direction = 'debit'
+                  AND t.transaction_kind NOT IN ('transfer', 'credit_card_payment')
+                ORDER BY t.financial_account_id, t.transaction_date"""
+        )
+        grouped: dict[tuple[UUID, str], list[dict[str, object]]] = defaultdict(list)
+        for row in rows:
+            merchant_key = _normalize_merchant(str(row["merchant_normalized"] or row["narration"]))
+            if merchant_key:
+                grouped[(row["financial_account_id"], merchant_key)].append(row)
+
+        detections: list[dict[str, object]] = []
+        for (account_id, merchant_key), entries in grouped.items():
+            if len(entries) < 3:
+                continue
+            intervals = [(entries[index]["transaction_date"] - entries[index - 1]["transaction_date"]).days for index in range(1, len(entries))]
+            cadence = _recurrence_cadence(intervals)
+            if not cadence:
+                continue
+            cadence_name, cadence_days = cadence
+            amounts = [Decimal(str(entry["amount"])) for entry in entries]
+            typical_amount = Decimal(str(median(amounts)))
+            tolerance = max(Decimal("50"), typical_amount * Decimal("0.10"))
+            if any(abs(amount - typical_amount) > tolerance for amount in amounts):
+                continue
+            last = entries[-1]
+            confidence = min(Decimal("0.97"), Decimal("0.72") + Decimal("0.05") * min(len(entries), 5))
+            display_name = str(last["merchant_normalized"] or last["narration"]).strip()[:160]
+            detections.append({
+                "id": uuid4(), "user_id": self.user_id, "account_id": account_id,
+                "merchant_key": merchant_key, "display_name": display_name,
+                "category_id": last["category_id"], "cadence": cadence_name,
+                "cadence_days": cadence_days, "typical_amount": typical_amount,
+                "tolerance": tolerance, "occurrence_count": len(entries),
+                "first_observed": entries[0]["transaction_date"], "last_observed": last["transaction_date"],
+                "next_expected": last["transaction_date"] + timedelta(days=cadence_days), "confidence": confidence,
+            })
+        with Session(self.engine) as session, session.begin():
+            for item in detections:
+                session.execute(text("""INSERT INTO recurring_payment_detections
+                    (id, user_id, financial_account_id, merchant_key, display_name, category_id, cadence, cadence_days,
+                     typical_amount, amount_tolerance, occurrence_count, first_observed_on, last_observed_on,
+                     next_expected_on, confidence)
+                    VALUES (:id, :user_id, :account_id, :merchant_key, :display_name, :category_id, :cadence,
+                            :cadence_days, :typical_amount, :tolerance, :occurrence_count, :first_observed,
+                            :last_observed, :next_expected, :confidence)
+                    ON CONFLICT (user_id, financial_account_id, merchant_key, cadence) DO UPDATE SET
+                        display_name = EXCLUDED.display_name, category_id = EXCLUDED.category_id,
+                        cadence_days = EXCLUDED.cadence_days, typical_amount = EXCLUDED.typical_amount,
+                        amount_tolerance = EXCLUDED.amount_tolerance, occurrence_count = EXCLUDED.occurrence_count,
+                        first_observed_on = EXCLUDED.first_observed_on, last_observed_on = EXCLUDED.last_observed_on,
+                        next_expected_on = EXCLUDED.next_expected_on, confidence = EXCLUDED.confidence,
+                        updated_at = now()"""), item)
+        return {"detected": len(detections)}
+
+    def list_recurring_payments(self, state: str | None = None) -> list[dict[str, object]]:
+        parameters: dict[str, object] = {"user_id": self.user_id}
+        query = """SELECT r.*, a.display_name AS account_name, c.name AS category
+                   FROM recurring_payment_detections r
+                   JOIN financial_accounts a ON a.id = r.financial_account_id
+                   LEFT JOIN categories c ON c.id = r.category_id
+                   WHERE r.user_id = :user_id"""
+        if state:
+            query += " AND r.state = :state"
+            parameters["state"] = state
+        return self._rows(query + " ORDER BY r.next_expected_on, r.display_name", parameters)
+
+    def review_recurring_payment(self, detection_id: UUID, state: str) -> dict[str, object]:
+        if state not in {"confirmed", "dismissed"}:
+            raise LedgerError("Recurring payment state must be confirmed or dismissed")
+        with Session(self.engine) as session, session.begin():
+            result = session.execute(text("""UPDATE recurring_payment_detections
+                SET state = :state, updated_at = now() WHERE id = :id AND user_id = :user_id"""),
+                {"state": state, "id": detection_id, "user_id": self.user_id})
+            if result.rowcount != 1:
+                raise LedgerError("Recurring payment detection was not found")
+        return self._one("SELECT * FROM recurring_payment_detections WHERE id = :id AND user_id = :user_id", {"id": detection_id, "user_id": self.user_id})
+
+    def balance_summary(self) -> dict[str, object]:
+        rows = self._rows(
+            """SELECT a.id, a.display_name, a.institution_code, a.account_type, a.currency,
+            COALESCE(SUM(CASE WHEN t.direction = 'credit' THEN t.amount ELSE -t.amount END), 0) AS signed_total
+            FROM financial_accounts a LEFT JOIN transactions t ON t.financial_account_id = a.id
+            WHERE a.user_id = :user_id AND a.status = 'active'
+            GROUP BY a.id, a.display_name, a.institution_code, a.account_type, a.currency ORDER BY a.display_name"""
+        )
+        cash = Decimal("0")
+        liability = Decimal("0")
+        accounts: list[dict[str, object]] = []
+        for row in rows:
+            balance = row["signed_total"] if row["account_type"] == "bank_account" else -row["signed_total"]
+            accounts.append({**row, "balance": balance})
+            if row["account_type"] == "bank_account":
+                cash += balance
+            else:
+                liability += balance
+        return {"cash_balance": cash, "credit_card_outstanding": liability, "net_worth": cash - liability, "accounts": accounts}
 
     def _require_account(self, account_id: UUID) -> None:
         self._one("SELECT id FROM financial_accounts WHERE id = :id AND user_id = :user_id AND status = 'active'", {"id": account_id, "user_id": self.user_id})
@@ -492,6 +798,19 @@ class LedgerService:
 
 def _parse_tabular_upload(filename: str, content: bytes) -> list[dict[str, object]]:
     return _parse_tabular_upload_with_mapping(filename, content, None)
+
+
+def _recurrence_cadence(intervals: list[int]) -> tuple[str, int] | None:
+    """Return a recognised cadence only when all intervals are close to it."""
+    if not intervals:
+        return None
+    candidate = round(float(median(intervals)))
+    for name, target, allowed_variance in (
+        ("weekly", 7, 2), ("monthly", 30, 6), ("quarterly", 91, 10), ("yearly", 365, 24),
+    ):
+        if abs(candidate - target) <= allowed_variance and all(abs(interval - target) <= allowed_variance for interval in intervals):
+            return name, target
+    return None
 
 
 def inspect_tabular_upload(filename: str, content: bytes) -> dict[str, object]:
@@ -645,11 +964,15 @@ def _transaction_kind(narration: str) -> str:
     upper = narration.upper()
     if any(marker in upper for marker in ("SALARY", "INTEREST", "DIVIDEND")):
         return "income"
-    if any(marker in upper for marker in ("CARD PAYMENT", "CC PAYMENT", "CREDIT CARD PAYMENT")):
+    if any(marker in upper for marker in ("CARD PAYMENT", "CC PAYMENT", "CREDIT CARD PAYMENT", "CARD BILL", "BILL PAYMENT")):
         return "credit_card_payment"
     if any(marker in upper for marker in ("NEFT", "IMPS", "RTGS", "TRANSFER")):
         return "transfer"
     return "unknown"
+
+
+def _normalize_merchant(value: str) -> str:
+    return " ".join(re.sub(r"[^a-z0-9]+", " ", value.lower()).split())
 
 
 def _required_text(payload: dict[str, object], key: str) -> str:

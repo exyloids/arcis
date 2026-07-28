@@ -10,6 +10,7 @@ from arcis_backend.gmail_oauth import GmailOAuthError, GmailOAuthService
 from arcis_backend.ledger import LedgerError, LedgerService, database_engine, inspect_tabular_upload
 from arcis_backend.mailboxes import CredentialCipher, MailboxError, MailboxService
 from arcis_backend.settings import get_settings
+from arcis_backend.statements import StatementService
 from arcis_backend.storage import MinioArtifactStorage
 from arcis_backend.sync_jobs import GmailSyncJobService, SyncJobError
 from arcis_contracts.health import HealthResponse, ReadinessResponse
@@ -56,6 +57,11 @@ candidates = CandidateService(database_engine(settings.database_url), settings.d
 gmail_oauth = GmailOAuthService(
     database_engine(settings.database_url), settings.demo_user_id, mailboxes,
     settings.gmail_oauth_client_id, settings.gmail_oauth_client_secret, settings.gmail_oauth_redirect_uri,
+)
+statements = StatementService(
+    database_engine(settings.database_url), settings.demo_user_id,
+    MinioArtifactStorage(settings.object_storage_endpoint, settings.object_storage_access_key,
+                         settings.object_storage_secret_key, settings.object_storage_bucket),
 )
 
 
@@ -120,6 +126,57 @@ def create_account(payload: dict[str, object]) -> dict[str, object]:
 @app.get("/api/v1/categories", tags=["categories"])
 def list_categories() -> list[dict[str, object]]:
     return ledger.list_categories()
+
+
+@app.get("/api/v1/merchant-rules", tags=["categories"])
+def list_merchant_rules() -> list[dict[str, object]]:
+    return ledger.list_merchant_rules()
+
+
+@app.post("/api/v1/merchant-rules", status_code=201, tags=["categories"])
+def create_merchant_rule(payload: dict[str, object]) -> dict[str, object]:
+    try:
+        return ledger.create_merchant_rule(payload)
+    except (LedgerError, ValueError) as error:
+        raise ledger_error(LedgerError(str(error))) from error
+
+
+@app.post("/api/v1/merchant-rules/apply", tags=["categories"])
+def apply_merchant_rules() -> dict[str, int]:
+    return ledger.apply_merchant_rules()
+
+
+@app.post("/api/v1/categories/apply-builtins", tags=["categories"])
+def apply_builtin_categories() -> dict[str, int]:
+    return ledger.apply_builtin_categories()
+
+
+@app.post("/api/v1/categories/categorize", tags=["categories"])
+def categorize_transactions() -> dict[str, int]:
+    return ledger.categorize_transactions()
+
+
+@app.post("/api/v1/recurring-payments/detect", tags=["insights"])
+def detect_recurring_payments() -> dict[str, int]:
+    return ledger.detect_recurring_payments()
+
+
+@app.get("/api/v1/recurring-payments", tags=["insights"])
+def list_recurring_payments(state: str | None = Query(default=None, pattern=r"^(detected|confirmed|dismissed)$")) -> list[dict[str, object]]:
+    return ledger.list_recurring_payments(state)
+
+
+@app.post("/api/v1/recurring-payments/{detection_id}/review", tags=["insights"])
+def review_recurring_payment(detection_id: UUID, payload: dict[str, str]) -> dict[str, object]:
+    try:
+        return ledger.review_recurring_payment(detection_id, payload.get("state", ""))
+    except LedgerError as error:
+        raise ledger_error(error) from error
+
+
+@app.get("/api/v1/accounts/balance-summary", tags=["accounts"])
+def account_balance_summary() -> dict[str, object]:
+    return ledger.balance_summary()
 
 
 @app.get("/api/v1/parser-candidates", tags=["mailboxes"])
@@ -249,14 +306,17 @@ async def create_import(
     account_id: UUID,
     file: UploadFile = File(...),
     column_mapping: str | None = Form(default=None),
+    pdf_password: str | None = Form(default=None),
 ) -> dict[str, object]:
     try:
         content = await file.read()
         if len(content) > 10 * 1024 * 1024:
             raise LedgerError("Statement uploads must not exceed 10 MiB")
         filename = file.filename or "statement.csv"
+        if filename.lower().endswith(".pdf"):
+            return statements.stage_pdf(account_id, filename, content, pdf_password)
         if not filename.lower().endswith((".csv", ".xlsx")):
-            raise LedgerError("Only CSV and XLSX statement imports are supported")
+            raise LedgerError("Only CSV, XLSX, and PDF statement imports are supported")
         try:
             mapping = json.loads(column_mapping) if column_mapping else None
         except json.JSONDecodeError as error:
@@ -279,7 +339,7 @@ async def inspect_import(file: UploadFile = File(...)) -> dict[str, object]:
 @app.get("/api/v1/imports/{import_id}/preview", tags=["imports"])
 def preview_import(import_id: UUID) -> dict[str, object]:
     try:
-        return ledger.import_preview(import_id)
+        return statements.preview(import_id) if statements.has_statement(import_id) else ledger.import_preview(import_id)
     except LedgerError as error:
         raise HTTPException(status_code=404, detail=str(error)) from error
 
@@ -287,7 +347,7 @@ def preview_import(import_id: UUID) -> dict[str, object]:
 @app.get("/api/v1/imports/{import_id}", tags=["imports"])
 def get_import(import_id: UUID) -> dict[str, object]:
     try:
-        return ledger.import_preview(import_id)
+        return statements.preview(import_id) if statements.has_statement(import_id) else ledger.import_preview(import_id)
     except LedgerError as error:
         raise HTTPException(status_code=404, detail=str(error)) from error
 
@@ -295,7 +355,38 @@ def get_import(import_id: UUID) -> dict[str, object]:
 @app.post("/api/v1/imports/{import_id}/confirm", tags=["imports"])
 def confirm_import(import_id: UUID) -> dict[str, int]:
     try:
-        return ledger.confirm_import(import_id)
+        result = statements.confirm(import_id) if statements.has_statement(import_id) else ledger.confirm_import(import_id)
+        categorized = ledger.categorize_transactions()
+        return {**result, "categorized": categorized["transactions_updated"]}
+    except LedgerError as error:
+        raise ledger_error(error) from error
+
+
+@app.get("/api/v1/reconciliation-reviews", tags=["imports"])
+def list_reconciliation_reviews(state: str = "needs_review") -> list[dict[str, object]]:
+    try:
+        return statements.reviews(state)
+    except LedgerError as error:
+        raise ledger_error(error) from error
+
+
+@app.get("/api/v1/statement-attachments", tags=["imports"])
+def list_statement_attachments() -> list[dict[str, object]]:
+    return statements.gmail_attachments()
+
+
+@app.post("/api/v1/statement-attachments/{artifact_id}/preview", tags=["imports"])
+def preview_statement_attachment(artifact_id: UUID, account_id: UUID, payload: dict[str, str]) -> dict[str, object]:
+    try:
+        return statements.stage_gmail_attachment(artifact_id, account_id, payload.get("pdf_password"))
+    except LedgerError as error:
+        raise ledger_error(error) from error
+
+
+@app.post("/api/v1/reconciliation-reviews/{review_id}", tags=["imports"])
+def resolve_reconciliation_review(review_id: UUID, payload: dict[str, str]) -> dict[str, object]:
+    try:
+        return statements.review(review_id, payload.get("state", ""))
     except LedgerError as error:
         raise ledger_error(error) from error
 
@@ -317,12 +408,13 @@ def cancel_import(import_id: UUID) -> None:
 def list_transactions(
     month: str | None = Query(default=None, pattern=r"^\d{4}-\d{2}$"),
     account_id: UUID | None = None,
+    account_type: str | None = Query(default=None, pattern=r"^(bank_account|credit_card)$"),
     category_id: UUID | None = None,
     q: str | None = Query(default=None, min_length=1, max_length=100),
     limit: int = Query(default=100, ge=1, le=200),
 ) -> list[dict[str, object]]:
     return ledger.list_transactions(
-        month=month, account_id=account_id, category_id=category_id, query_text=q, limit=limit
+        month=month, account_id=account_id, account_type=account_type, category_id=category_id, query_text=q, limit=limit
     )
 
 
@@ -330,6 +422,7 @@ def list_transactions(
 def transaction_page(
     month: str | None = Query(default=None, pattern=r"^\d{4}-\d{2}$"),
     account_id: UUID | None = None,
+    account_type: str | None = Query(default=None, pattern=r"^(bank_account|credit_card)$"),
     category_id: UUID | None = None,
     q: str | None = Query(default=None, min_length=1, max_length=100),
     cursor: str | None = Query(default=None, max_length=200),
@@ -339,6 +432,7 @@ def transaction_page(
         return ledger.transaction_page(
             month=month,
             account_id=account_id,
+            account_type=account_type,
             category_id=category_id,
             query_text=q,
             cursor=cursor,
@@ -364,3 +458,8 @@ def update_transaction(transaction_id: UUID, payload: dict[str, object]) -> dict
 @app.get("/api/v1/reports/monthly", tags=["analytics"])
 def monthly_report(month: str = Query(pattern=r"^\d{4}-\d{2}$")) -> dict[str, object]:
     return ledger.monthly_report(month)
+
+
+@app.get("/api/v1/insights/monthly", tags=["insights"])
+def monthly_insights(month: str = Query(pattern=r"^\d{4}-\d{2}$")) -> dict[str, object]:
+    return ledger.monthly_insights(month)

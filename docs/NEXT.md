@@ -29,6 +29,29 @@ starting work. Complete tasks in order and record evidence in `STATUS.md`.
 - [x] **GMAIL-004** Implement the initial HDFC transaction-alert adapter, parser metrics, and safe failure reporting.
 - [x] **GMAIL-005** Add scheduled mailbox synchronization and user-visible run history after on-demand synchronization is reliable.
 
+## Phase 3 — Statements and reconciliation
+
+- [x] **STATEMENT-001** Implement private PDF statement staging, preview, and confirmation for manual uploads.
+- [x] **STATEMENT-002** Detect and stage PDF statement attachments discovered during Gmail synchronization.
+- [x] **STATEMENT-003** Extract initial ICICI/HDFC statement rows and statement/card metadata through versioned deterministic parsers.
+- [x] **RECONCILIATION-001** Match statement rows to canonical transactions, retain evidence, and create statement-only transactions for missed alerts.
+- [x] **RECONCILIATION-002** Provide a review queue for uncertain matches, including explicit accept/reject decisions without data loss.
+
+## Next milestone — Phase 4 intelligence
+
+- [x] **INTELLIGENCE-001** Define merchant normalization rules and a correction-backed merchant vocabulary.
+- [x] **INTELLIGENCE-002** Add deterministic category rules, confidence scores, and correction-backed user overrides.
+- [x] **INTELLIGENCE-003** Implement recurring-payment and subscription detection from canonical transactions.
+- [x] **INTELLIGENCE-004** Add evidence-linked anomaly detection and monthly spending forecasts.
+
+## Product experience
+
+- [x] **UX-001** Establish the responsive Arcis visual system and separate the
+  operational page into Home, Transactions, Accounts, Cards, Imports, and
+  Mailboxes views.
+- [ ] **UX-002** Review the deployed Home screen with real data and refine
+  information hierarchy, copy, density, and mobile interaction details.
+
 ## Update protocol
 
 1. Keep task IDs stable and descriptive.
