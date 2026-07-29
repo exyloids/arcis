@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from uuid import UUID
 
 from minio import Minio
+from minio.commonconfig import CopySource
 
 
 @dataclass(frozen=True)
@@ -40,6 +41,16 @@ class MinioArtifactStorage:
 
     def delete(self, object_key: str) -> None:
         self.client.remove_object(self.bucket, object_key)
+
+    def quarantine(self, object_key: str, user_id: UUID, artifact_id: UUID) -> str:
+        recovery_key = f"recovery/{user_id}/{artifact_id}/source"
+        self.client.copy_object(self.bucket, recovery_key, CopySource(self.bucket, object_key))
+        self.client.remove_object(self.bucket, object_key)
+        return recovery_key
+
+    def restore(self, recovery_key: str, original_key: str) -> None:
+        self.client.copy_object(self.bucket, original_key, CopySource(self.bucket, recovery_key))
+        self.client.remove_object(self.bucket, recovery_key)
 
     def put_gmail_message(self, user_id: UUID, mailbox_id: UUID, message_id: str, content: bytes) -> StoredArtifact:
         object_key = f"gmail/{user_id}/{mailbox_id}/{message_id}.eml"

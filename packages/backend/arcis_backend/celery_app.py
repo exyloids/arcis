@@ -8,5 +8,14 @@ settings = get_settings()
 celery_app = Celery("arcis", broker=settings.redis_url, backend=settings.redis_url, include=["arcis_backend.tasks"])
 celery_app.conf.update(
     timezone="Asia/Kolkata",
-    beat_schedule={"daily-gmail-sync": {"task": "arcis.gmail.enqueue_daily", "schedule": 24 * 60 * 60}},
+    beat_schedule={
+        "daily-gmail-sync": {
+            "task": "arcis.gmail.enqueue_daily",
+            "schedule": 24 * 60 * 60,
+        },
+        "daily-document-retention": {
+            "task": "arcis.privacy.enforce_retention",
+            "schedule": 24 * 60 * 60,
+        },
+    },
 )

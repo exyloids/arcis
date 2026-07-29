@@ -8,11 +8,12 @@ It collects transaction evidence from connected Gmail accounts and uploaded
 statements, normalizes it into a canonical ledger, reconciles duplicates, and
 turns the result into useful reports and grounded financial insights.
 
-The project is currently in the planning and architecture phase. It is being
-built for personal use first, while keeping the data model and security
-boundaries ready for future multi-user support.
+The project now has a working single-user application through its first five
+delivery phases. It is built for personal use first, while keeping user
+ownership, data isolation, and security boundaries ready for future
+authentication and multi-user support.
 
-## What Arcis will do
+## What Arcis does today
 
 - Connect multiple Gmail accounts through OAuth.
 - Synchronize bank and credit-card transaction alerts daily or on demand.
@@ -27,9 +28,14 @@ boundaries ready for future multi-user support.
   status.
 - Identify transfers, card payments, subscriptions, recurring expenses, and
   potential anomalies.
-- Generate monthly spending summaries, forecasts, and savings opportunities.
-- Answer questions through a conversational assistant backed by safe,
-  predefined analytics tools.
+- Generate evidence-linked monthly spending summaries, forecasts, anomalies,
+  budgets, recurring commitments, and category trends.
+- Manage statement files through a private document vault with configurable
+  retention and a 30-day recovery window after deletion.
+
+Natural-language finance questions, additional institution adapters,
+investment tracking, and production multi-user authentication remain roadmap
+work.
 
 ## Example use cases
 
@@ -118,9 +124,9 @@ The design includes:
 - User ownership checks on every API query and background job.
 - Review queues for uncertain parsing, matching, and categorization decisions.
 
-## Planned architecture
+## Architecture
 
-Arcis is planned as a modular monolith with clear domain boundaries:
+Arcis is implemented as a modular monolith with clear domain boundaries:
 
 ```text
 Next.js + TypeScript frontend
@@ -138,25 +144,32 @@ The system separates immutable source evidence from canonical transactions.
 That allows parser reprocessing, safe deduplication, reconciliation, audit
 history, and reproducible reports.
 
-Planned technologies include Next.js, FastAPI, PostgreSQL, SQLAlchemy, Alembic,
-Celery, Redis, Gmail API, PyMuPDF, pandas, openpyxl, OpenAI structured outputs,
-embeddings, tool calling, pytest, Vitest, Playwright, Docker Compose, and AWS
-managed services for production learning.
+The implemented stack includes Next.js, FastAPI, PostgreSQL, SQLAlchemy,
+Alembic, Celery, Redis, Gmail API, PyMuPDF, pdfplumber, openpyxl, Playwright,
+Docker Compose, and S3-compatible private object storage. OpenAI structured
+outputs, embeddings, tool calling, and AWS managed deployment remain planned.
 
 ## Project status and documentation
 
-Implementation has not started yet. The project is currently defining its
-contracts, security boundaries, feasibility checks, and delivery sequence.
+Foundation, manual ledger, Gmail automation, statement reconciliation,
+deterministic intelligence, and the main everyday-control features are
+implemented. The remaining pre-investment work is production authentication,
+complete account deletion, real-provider validation for another Gmail
+mailbox, deployment hardening, and final real-data visual review.
 
 - [Project plan](docs/PLAN.md) — product scope, MVP boundary, phases, risks,
   success criteria, and execution protocol.
 - [Technical architecture](docs/ARCHITECTURE.md) — database model, API
   contracts, ingestion workflows, workers, security, deployment, testing, and
   recovery behavior.
+- [Current status](docs/STATUS.md) — implemented behavior and verification
+  evidence.
+- [Implementation ledger](docs/NEXT.md) — completed and pending delivery
+  tasks.
 
-The first usable release will prioritize a trustworthy monthly-close workflow:
-manual statement import, accurate categorization, reconciliation, reporting,
-and then Gmail automation and AI features.
+The current release supports the trustworthy monthly-close workflow: statement
+import, preview, reconciliation, categorization, reporting, Gmail sync, and
+source-document controls.
 
 ## Development
 
@@ -188,10 +201,19 @@ Run the dependency-free test suite:
 python3 -m unittest discover -s tests -p 'test_*.py' -v
 ```
 
+Run the production frontend build and browser release journeys:
+
+```bash
+cd apps/web
+npm run build
+npx playwright install chromium
+npm run test:e2e
+```
+
 The local stack exposes the web app on port `3000`, the API on port `8000`,
 PostgreSQL on `5432`, Redis on `6379`, and the S3-compatible MinIO service on
 `9000` with its console on `9001`.
 
 ## License
 
-License information will be added before implementation and distribution.
+License information will be added before public distribution.

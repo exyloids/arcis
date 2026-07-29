@@ -17,6 +17,8 @@ from arcis_contracts.health import HealthResponse, ReadinessResponse
 from fastapi import FastAPI, File, Form, HTTPException, Query, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import RedirectResponse
+from redis import Redis
+from sqlalchemy import text
 
 settings = get_settings()
 app = FastAPI(
@@ -28,7 +30,7 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=["http://localhost:3000", "http://127.0.0.1:3000"],
     allow_credentials=False,
-    allow_methods=["GET", "POST", "PATCH", "OPTIONS"],
+    allow_methods=["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
     allow_headers=["Content-Type"],
 )
 
@@ -98,14 +100,31 @@ def health() -> HealthResponse:
 
 @app.get("/ready", response_model=ReadinessResponse, tags=["operations"])
 def readiness() -> ReadinessResponse:
-    # Dependency probes are introduced with the first database/worker slice.
-    # The endpoint is explicit so orchestration can distinguish liveness from
-    # readiness without treating an unimplemented probe as healthy.
+    dependencies: dict[str, str] = {}
+    try:
+        with ledger.engine.connect() as connection:
+            connection.execute(text("SELECT 1"))
+        dependencies["database"] = "ok"
+    except Exception:
+        dependencies["database"] = "unavailable"
+
+    try:
+        redis_client = Redis.from_url(
+            settings.redis_url,
+            socket_connect_timeout=1,
+            socket_timeout=1,
+        )
+        dependencies["redis"] = "ok" if redis_client.ping() else "unavailable"
+        redis_client.close()
+    except Exception:
+        dependencies["redis"] = "unavailable"
+
+    status = "ready" if all(value == "ok" for value in dependencies.values()) else "degraded"
     return ReadinessResponse(
-        status="starting",
+        status=status,
         service="api",
         version=__version__,
-        dependencies={"database": "not_checked", "redis": "not_checked"},
+        dependencies=dependencies,
         checked_at=datetime.now(UTC),
     )
 
@@ -174,9 +193,50 @@ def review_recurring_payment(detection_id: UUID, payload: dict[str, str]) -> dic
         raise ledger_error(error) from error
 
 
+@app.patch("/api/v1/recurring-payments/{detection_id}", tags=["insights"])
+def update_recurring_payment(detection_id: UUID, payload: dict[str, object]) -> dict[str, object]:
+    try:
+        return ledger.update_recurring_payment(detection_id, payload)
+    except LedgerError as error:
+        raise ledger_error(error) from error
+
+
 @app.get("/api/v1/accounts/balance-summary", tags=["accounts"])
 def account_balance_summary() -> dict[str, object]:
     return ledger.balance_summary()
+
+
+@app.get("/api/v1/card-statements", tags=["credit-cards"])
+def list_card_statements() -> list[dict[str, object]]:
+    return ledger.list_card_statements()
+
+
+@app.patch("/api/v1/card-statements/{statement_id}/payment", tags=["credit-cards"])
+def update_card_statement_payment(statement_id: UUID, payload: dict[str, object]) -> dict[str, object]:
+    try:
+        return ledger.update_card_statement_payment(statement_id, payload)
+    except LedgerError as error:
+        raise ledger_error(error) from error
+
+
+@app.post("/api/v1/card-statements/reminders/generate", tags=["notifications"])
+def generate_card_reminders() -> dict[str, int]:
+    return ledger.generate_card_reminders()
+
+
+@app.get("/api/v1/notifications", tags=["notifications"])
+def list_notifications(
+    state: str | None = Query(default=None, pattern=r"^(unread|read|dismissed)$"),
+) -> list[dict[str, object]]:
+    return ledger.list_notifications(state)
+
+
+@app.patch("/api/v1/notifications/{notification_id}", tags=["notifications"])
+def update_notification(notification_id: UUID, payload: dict[str, str]) -> dict[str, object]:
+    try:
+        return ledger.update_notification(notification_id, payload.get("state", ""))
+    except LedgerError as error:
+        raise ledger_error(error) from error
 
 
 @app.get("/api/v1/parser-candidates", tags=["mailboxes"])
@@ -407,6 +467,10 @@ def cancel_import(import_id: UUID) -> None:
 @app.get("/api/v1/transactions", tags=["ledger"])
 def list_transactions(
     month: str | None = Query(default=None, pattern=r"^\d{4}-\d{2}$"),
+    period: str | None = Query(
+        default=None,
+        pattern=r"^(all_time|this_month|last_month|last_3_months|last_6_months|this_year)$",
+    ),
     account_id: UUID | None = None,
     account_type: str | None = Query(default=None, pattern=r"^(bank_account|credit_card)$"),
     category_id: UUID | None = None,
@@ -414,13 +478,23 @@ def list_transactions(
     limit: int = Query(default=100, ge=1, le=200),
 ) -> list[dict[str, object]]:
     return ledger.list_transactions(
-        month=month, account_id=account_id, account_type=account_type, category_id=category_id, query_text=q, limit=limit
+        month=month,
+        period=period,
+        account_id=account_id,
+        account_type=account_type,
+        category_id=category_id,
+        query_text=q,
+        limit=limit,
     )
 
 
 @app.get("/api/v1/transactions/page", tags=["ledger"])
 def transaction_page(
     month: str | None = Query(default=None, pattern=r"^\d{4}-\d{2}$"),
+    period: str | None = Query(
+        default=None,
+        pattern=r"^(all_time|this_month|last_month|last_3_months|last_6_months|this_year)$",
+    ),
     account_id: UUID | None = None,
     account_type: str | None = Query(default=None, pattern=r"^(bank_account|credit_card)$"),
     category_id: UUID | None = None,
@@ -431,6 +505,7 @@ def transaction_page(
     try:
         return ledger.transaction_page(
             month=month,
+            period=period,
             account_id=account_id,
             account_type=account_type,
             category_id=category_id,
@@ -458,6 +533,123 @@ def update_transaction(transaction_id: UUID, payload: dict[str, object]) -> dict
 @app.get("/api/v1/reports/monthly", tags=["analytics"])
 def monthly_report(month: str = Query(pattern=r"^\d{4}-\d{2}$")) -> dict[str, object]:
     return ledger.monthly_report(month)
+
+
+@app.get("/api/v1/preferences", tags=["preferences"])
+def preferences() -> dict[str, object]:
+    return ledger.preferences()
+
+
+@app.patch("/api/v1/preferences/reporting-period", tags=["preferences"])
+def update_reporting_period(payload: dict[str, object]) -> dict[str, object]:
+    try:
+        return ledger.update_reporting_period(str(payload.get("reporting_period", "")))
+    except LedgerError as error:
+        raise ledger_error(error) from error
+
+
+@app.get("/api/v1/documents", tags=["documents"])
+def list_documents() -> list[dict[str, object]]:
+    return ledger.list_documents()
+
+
+@app.delete("/api/v1/documents/{artifact_id}/content", status_code=200, tags=["documents"])
+def redact_document(artifact_id: UUID) -> dict[str, object]:
+    try:
+        return ledger.redact_document(artifact_id)
+    except LedgerError as error:
+        raise ledger_error(error) from error
+
+
+@app.post("/api/v1/documents/{artifact_id}/restore", tags=["documents"])
+def restore_document(artifact_id: UUID) -> dict[str, object]:
+    try:
+        return ledger.restore_document(artifact_id)
+    except LedgerError as error:
+        raise ledger_error(error) from error
+
+
+@app.get("/api/v1/privacy/inventory", tags=["privacy"])
+def privacy_inventory() -> dict[str, object]:
+    return ledger.privacy_inventory()
+
+
+@app.get("/api/v1/privacy/export", tags=["privacy"])
+def privacy_export() -> dict[str, object]:
+    return ledger.privacy_export()
+
+
+@app.patch("/api/v1/privacy/retention", tags=["privacy"])
+def update_retention_policy(payload: dict[str, object]) -> dict[str, object]:
+    try:
+        return ledger.update_retention_policy(payload)
+    except LedgerError as error:
+        raise ledger_error(error) from error
+
+
+@app.post("/api/v1/privacy/retention/enforce", tags=["privacy"])
+def enforce_retention_policy() -> dict[str, int]:
+    try:
+        return ledger.enforce_retention_policy()
+    except LedgerError as error:
+        raise ledger_error(error) from error
+
+
+@app.get("/api/v1/reports/period", tags=["analytics"])
+def period_report(
+    period: str = Query(
+        pattern=r"^(all_time|this_month|last_month|last_3_months|last_6_months|this_year)$"
+    ),
+) -> dict[str, object]:
+    try:
+        return ledger.period_report(period)
+    except LedgerError as error:
+        raise ledger_error(error) from error
+
+
+@app.get("/api/v1/spending/summary", tags=["analytics"])
+def spending_summary() -> dict[str, object]:
+    return ledger.spending_summary()
+
+
+@app.get("/api/v1/budgets", tags=["budgets"])
+def list_budgets(month: str = Query(pattern=r"^\d{4}-\d{2}$")) -> list[dict[str, object]]:
+    try:
+        return ledger.list_budgets(month)
+    except LedgerError as error:
+        raise ledger_error(error) from error
+
+
+@app.post("/api/v1/budgets", tags=["budgets"], status_code=201)
+def create_budget(payload: dict[str, object]) -> dict[str, object]:
+    try:
+        return ledger.create_budget(payload)
+    except (LedgerError, ValueError) as error:
+        raise ledger_error(LedgerError(str(error))) from error
+
+
+@app.patch("/api/v1/budgets/{budget_id}", tags=["budgets"])
+def update_budget(budget_id: UUID, payload: dict[str, object]) -> dict[str, object]:
+    try:
+        return ledger.update_budget(budget_id, payload)
+    except LedgerError as error:
+        raise ledger_error(error) from error
+
+
+@app.delete("/api/v1/budgets/{budget_id}", tags=["budgets"], status_code=204)
+def delete_budget(budget_id: UUID) -> None:
+    try:
+        ledger.delete_budget(budget_id)
+    except LedgerError as error:
+        raise ledger_error(error) from error
+
+
+@app.get("/api/v1/spending/categories/{category_id}/trend", tags=["analytics"])
+def spending_category_trend(
+    category_id: UUID,
+    granularity: str = Query(default="monthly", pattern=r"^(monthly|yearly)$"),
+) -> dict[str, object]:
+    return ledger.spending_category_trend(category_id, granularity)
 
 
 @app.get("/api/v1/insights/monthly", tags=["insights"])

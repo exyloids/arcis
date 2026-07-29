@@ -52,6 +52,31 @@ starting work. Complete tasks in order and record evidence in `STATUS.md`.
 - [ ] **UX-002** Review the deployed Home screen with real data and refine
   information hierarchy, copy, density, and mobile interaction details.
 
+## Phase 5 — Everyday controls, trust, and polish
+
+- [x] **ANALYTICS-001** Define and implement shared reporting-period semantics
+  across Home, Transactions, Spending, Budgets, and Insights, including
+  a server-side per-user persisted preference.
+- [x] **BUDGETS-001** Implement monthly category budgets with spent, remaining,
+  utilization, over-budget state, and budget-versus-actual views on Home and
+  Spending.
+- [x] **RECURRING-001** Provide a dedicated recurring and subscription
+  management experience with confirm, dismiss, restore-dismissed, edit, next
+  date, and monthly/annual commitment views.
+- [x] **REMINDERS-001** Track credit-card statement amount, minimum due, due
+  date, and payment status, with idempotent upcoming and overdue reminders.
+- [x] **DOCUMENTS-001** Add a document-vault view for uploaded and
+  Gmail-detected statements, with safe storage, parser/review status, and
+  source metadata without exposing sensitive raw content.
+- [ ] **PRIVACY-001** Implement verified user export, mailbox/account/source
+  deletion, retention controls, and an exercised restoration workflow.
+- [x] **UX-003** Establish accessibility and responsive acceptance gates:
+  keyboard-safe dialogs, visible focus, readable text, touch targets, and
+  desktop/tablet/mobile visual regression coverage.
+- [x] **RELEASE-001** Create a release verification suite covering imports,
+  duplicate handling, reconciliation, Gmail sync recovery, categorization,
+  recurring review, privacy controls, and critical browser journeys.
+
 ## Update protocol
 
 1. Keep task IDs stable and descriptive.

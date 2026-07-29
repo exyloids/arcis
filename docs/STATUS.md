@@ -2,12 +2,131 @@
 
 ## Current phase
 
-Phase 4 — Finance intelligence
+Phase 5 — Everyday controls, trust, and polish
 
 ## Current task
 
-The initial Phase 4 intelligence milestone is complete. The next focus is Home
-screen UX refinement using real data, followed by budgets and reminders.
+The initial Phase 5 implementation is complete except for full user/account
+erasure and final real-data visual sign-off. Full erasure remains coupled to
+the production authentication and re-authentication workflow; the current
+single-user demo does not expose an unsafe unauthenticated delete-account
+operation.
+
+## Phase 5 everyday controls
+
+- Reporting periods are defined once and persisted in PostgreSQL preferences.
+  Home, Transactions, reports, budgets, and relevant insights use the selected
+  calendar-aligned period.
+- Monthly category budgets show spent, remaining, utilization, and
+  over-budget state.
+- Recurring commitments have detected, confirmed, dismissed, restored, and
+  editable states, with next-date and monthly/annual commitment totals.
+- Credit-card statements expose amount, minimum due, due date, payment status,
+  and idempotent upcoming/overdue in-app reminders.
+- The document vault combines manual uploads and Gmail artifacts without
+  exposing raw content. Deletion moves bytes to a private recovery key for 30
+  days; restore copies bytes back to the original key.
+- Privacy controls provide a safe metadata/ledger export, Gmail disconnect,
+  per-source deletion and restoration, configurable retention, immediate
+  enforcement, and daily scheduled enforcement. Full account erasure remains
+  open as `PRIVACY-001`.
+- Dialogs now contain keyboard focus, close with Escape, return focus after
+  closing, prevent background scrolling, and expose labelled dialog roles.
+- The release suite adds deterministic Playwright journeys at desktop, tablet,
+  and mobile viewport sizes. Existing unit and opt-in PostgreSQL integration
+  suites continue to cover imports, duplicates, reconciliation, Gmail
+  recovery, and parser behavior.
+- `/ready` now probes PostgreSQL and Redis instead of returning placeholder
+  dependency states.
+- Patched PostCSS and Sharp versions are enforced through npm overrides; the
+  production dependency audit reports zero vulnerabilities.
+
+Verification completed on 2026-07-29:
+
+```bash
+.venv/bin/ruff check apps packages migrations scripts spikes tests
+.venv/bin/python -m unittest discover -s tests -p 'test_*.py' -v
+(cd apps/web && npm run build)
+(cd apps/web && npm run test:e2e)
+(cd apps/web && npm audit --omit=dev)
+docker-compose -f deploy/compose/docker-compose.yml exec -T api alembic current
+curl -fsS http://localhost:8000/api/v1/privacy/inventory
+curl -fsS -X POST http://localhost:8000/api/v1/privacy/retention/enforce
+```
+
+Result: lint passed; 62 tests passed with 9 opt-in PostgreSQL tests skipped;
+the production web build passed; all six desktop/tablet/mobile browser journeys
+passed; npm reported zero production dependency vulnerabilities; Alembic
+reached `0014_document_retention_recovery`; and retention enforcement reported
+zero currently expired files.
+
+The recovery workflow was exercised against rejected Gmail artifact
+`1514883a-89b0-4f20-864f-544cfa81adbf`. It entered a recoverable deletion
+state with a 30-day purge date and was immediately restored with its original
+20,658-byte size. No user artifact was left deleted.
+
+## Product-improvement backlog adopted
+
+The following improvements were promoted into the delivery ledger after a
+comparison with an external personal-finance product specification:
+
+- consistent reporting-period semantics;
+- recurring/subscription review and dismissal management;
+- a safe document-vault experience;
+- user export, deletion, retention, and restore controls;
+- explicit accessibility/responsive quality gates; and
+- a release-verification suite for critical financial workflows.
+
+The architecture already contains the underlying privacy, retention, export,
+and test boundaries. `NEXT.md` now tracks the missing product work as ordered
+Phase 5 tasks; no external-platform or simplified-storage design was adopted.
+
+## Home review refinements in progress
+
+- Home now renders a dashboard loading state while its financial data is being
+  retrieved. It no longer briefly presents a zero balance or empty cards as if
+  they were confirmed financial facts.
+- The cash-flow summary labels now explicitly say that incoming and outgoing
+  values are for the current month. Card outstanding remains a separate live
+  balance, consistent with the savings-account-only total balance rule.
+- Real-data review is still open: verify information hierarchy, content
+  density, and mobile interaction after regular use with imported statements.
+
+Verification completed on 2026-07-29:
+
+```bash
+(cd apps/web && npm run build)
+```
+
+Result: the Next.js production build passed.
+
+## Spending analytics page
+
+- Added a dedicated **Spending** item in the primary navigation and changed the
+  Home-card action from a recent-transactions link to **View spending**.
+- The page groups all available debit transactions at the parent-category
+  level, shows total category spend and percentage in an interactive SVG donut
+  and selectable breakdown, and displays the selected category across its
+  complete monthly or yearly history.
+- Hovering a trend point shows its exact period and amount. The page has no
+  date-picker filter: the category graph always represents all available data.
+- Transfers and credit-card bill-payment records are excluded from this expense
+  analysis to prevent credit-card purchases and their subsequent bank payment
+  from being counted twice.
+- Added analytics endpoints for the monthly category summary and a selected
+  category's monthly/yearly trend.
+
+Verification completed on 2026-07-29:
+
+```bash
+.venv/bin/ruff check apps/api/main.py packages/backend/arcis_backend/ledger.py
+(cd apps/web && npm run build)
+curl -fsS "http://localhost:8000/api/v1/spending/summary"
+curl -fsS "http://localhost:8000/api/v1/spending/categories/<CATEGORY_ID>/trend?granularity=monthly"
+```
+
+Result: lint and production build passed. The local API returned category
+percentages and a complete category trend series.
 
 ## Phase 4 monthly insights
 

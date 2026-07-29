@@ -917,22 +917,41 @@ Completion criteria:
 
 Work:
 
+- Shared reporting-period framework: all time, current/previous month, recent
+  periods, and current year. A selected period must affect every relevant
+  report, chart, ledger view, budget calculation, and insight consistently.
+  Persist the preference only within the authenticated user profile; never use
+  browser storage as the source of truth.
 - Monthly and category budgets.
 - Card due-date reminders.
+- Dedicated recurring and subscription management, including confirmed,
+  detected, dismissed, and restored patterns; next expected date; and monthly
+  and annual commitment totals.
 - Upcoming recurring-expense timeline.
 - In-app and email notifications.
-- Responsive UI and accessibility.
+- Document vault showing uploaded and Gmail-detected source files, source and
+  parser state, safe review status, and links only to authorized metadata.
+- Responsive UI and accessibility: keyboard-safe dialogs, visible focus,
+  readable body text, mobile touch targets, and verified desktop/tablet/mobile
+  layouts.
 - Dashboard caching and incremental loading.
 - Pagination and background report generation.
-- Privacy controls and data deletion.
+- Privacy controls: data export, mailbox/account/source deletion, configurable
+  retention, and tested backup-restore/deletion workflows.
 - Performance, recovery, and security testing.
+- Release verification using realistic sanitized fixtures and critical browser
+  flows for imports, duplicate detection, reconciliation, Gmail recovery,
+  recurring review, and privacy controls.
 
 Completion criteria:
 
 - The app is reliable for everyday use.
 - Notification retries cannot create repeated reminders.
 - Several years of transactions remain responsive.
-- Restore and deletion procedures have been exercised.
+- All selected-period views produce consistent totals from the same source
+  transactions.
+- Restore, export, and deletion procedures have been exercised.
+- Key workflows meet accessibility and responsive acceptance gates.
 
 ### Phase 6 — Investments and wealth tracking
 

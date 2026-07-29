@@ -25,8 +25,11 @@ class ScaffoldTests(unittest.TestCase):
 
     def test_web_package_has_required_scripts(self):
         package = json.loads((ROOT / "apps/web/package.json").read_text())
-        self.assertEqual(set(package["scripts"]), {"dev", "build", "start", "lint"})
+        self.assertTrue(
+            {"dev", "build", "start", "lint", "test:e2e"}.issubset(package["scripts"])
+        )
         self.assertIn("next", package["dependencies"])
+        self.assertIn("@playwright/test", package["devDependencies"])
 
     def test_initial_migration_contains_authoritative_tables(self):
         migration = (ROOT / "migrations/versions/0001_initial.py").read_text()

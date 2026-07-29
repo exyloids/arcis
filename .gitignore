@@ -15,6 +15,8 @@ google-oauth*.json
 gmail-token*.json
 node_modules/
 .next/
+playwright-report/
+test-results/
 out/
 .turbo/
 .eslintcache

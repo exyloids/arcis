@@ -5,7 +5,7 @@ from celery import shared_task
 from arcis_backend.candidates import CandidateService
 from arcis_backend.gmail_artifacts import GmailArtifactRepository
 from arcis_backend.gmail_oauth import GmailOAuthService
-from arcis_backend.ledger import database_engine
+from arcis_backend.ledger import LedgerService, database_engine
 from arcis_backend.mailboxes import CredentialCipher, MailboxService
 from arcis_backend.settings import get_settings
 from arcis_backend.storage import MinioArtifactStorage
@@ -35,3 +35,19 @@ def enqueue_daily_gmail_syncs():
     for _ in queued:
         run_next_gmail_sync.delay()
     return [str(job_id) for job_id in queued]
+
+
+@shared_task(name="arcis.privacy.enforce_retention")
+def enforce_document_retention():
+    settings = get_settings()
+    service = LedgerService(
+        database_engine(settings.database_url),
+        settings.demo_user_id,
+        MinioArtifactStorage(
+            settings.object_storage_endpoint,
+            settings.object_storage_access_key,
+            settings.object_storage_secret_key,
+            settings.object_storage_bucket,
+        ),
+    )
+    return service.enforce_retention_policy()

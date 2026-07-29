@@ -16,7 +16,7 @@ import io
 import json
 import re
 from collections import defaultdict
-from datetime import date, timedelta
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from statistics import median
@@ -72,6 +72,15 @@ BUILTIN_MERCHANT_MAPPINGS = (
     ("bpcl", "BP Fuel", "transport_fuel"),
     ("amazon", "Amazon", "shopping_electronics"),
 )
+
+REPORTING_PERIODS = {
+    "all_time",
+    "this_month",
+    "last_month",
+    "last_3_months",
+    "last_6_months",
+    "this_year",
+}
 
 
 class LedgerError(ValueError):
@@ -358,6 +367,140 @@ class LedgerService:
             confirmed_at, created_at FROM imports WHERE user_id = :user_id ORDER BY created_at DESC"""
         )
 
+    def list_documents(self) -> list[dict[str, object]]:
+        """Return safe document metadata without exposing object keys or contents."""
+        return self._rows(
+            """SELECT sa.id, sa.kind, sa.detected_mime_type, sa.byte_size,
+                      sa.lifecycle_state, sa.created_at, sa.deleted_at, sa.purge_after,
+                      (sa.recovery_object_key IS NOT NULL) AS can_restore,
+                      i.id AS import_id, i.filename, i.state AS import_state,
+                      a.display_name AS account_name,
+                      m.display_email AS mailbox_email,
+                      pc.state AS parser_state, pc.review_reason
+               FROM source_artifacts sa
+               LEFT JOIN imports i ON i.id = sa.import_id
+               LEFT JOIN financial_accounts a ON a.id = i.financial_account_id
+               LEFT JOIN mailboxes m ON m.id = sa.mailbox_id
+               LEFT JOIN LATERAL (
+                   SELECT state, review_reason
+                   FROM parser_candidates
+                   WHERE artifact_id = sa.id
+                   ORDER BY created_at DESC
+                   LIMIT 1
+               ) pc ON true
+               WHERE sa.user_id = :user_id
+               ORDER BY sa.created_at DESC"""
+        )
+
+    def redact_document(self, artifact_id: UUID) -> dict[str, object]:
+        """Move raw content to a bounded recovery area while retaining provenance."""
+        with Session(self.engine) as session, session.begin():
+            artifact = session.execute(
+                text(
+                    """SELECT id, object_key, recovery_object_key, lifecycle_state
+                       FROM source_artifacts
+                       WHERE id = :id AND user_id = :user_id
+                       FOR UPDATE"""
+                ),
+                {"id": artifact_id, "user_id": self.user_id},
+            ).mappings().one_or_none()
+            if artifact is None:
+                raise LedgerError("Document was not found")
+            if artifact["lifecycle_state"] == "redacted":
+                return {
+                    "id": artifact_id,
+                    "lifecycle_state": "redacted",
+                    "can_restore": artifact["recovery_object_key"] is not None,
+                }
+            object_key = artifact["object_key"]
+            recovery_key = None
+            if object_key:
+                if self.storage is None:
+                    raise LedgerError("Document storage is unavailable")
+                recovery_key = self.storage.quarantine(
+                    str(object_key), self.user_id, artifact_id
+                )
+            session.execute(
+                text(
+                    """UPDATE source_artifacts
+                       SET original_object_key = object_key,
+                           recovery_object_key = :recovery_object_key,
+                           object_key = NULL,
+                           lifecycle_state = 'redacted',
+                           deleted_at = now(),
+                           purge_after = now() + INTERVAL '30 days'
+                       WHERE id = :id"""
+                ),
+                {"id": artifact_id, "recovery_object_key": recovery_key},
+            )
+            session.execute(
+                text(
+                    """INSERT INTO audit_events
+                       (id, user_id, actor_type, action, target_type, target_id, result)
+                       VALUES (:id, :user_id, 'user', 'document.redact',
+                               'source_artifact', :target_id, 'success')"""
+                ),
+                {
+                    "id": uuid4(),
+                    "user_id": self.user_id,
+                    "target_id": artifact_id,
+                },
+            )
+        return {
+            "id": artifact_id,
+            "lifecycle_state": "redacted",
+            "can_restore": recovery_key is not None,
+        }
+
+    def restore_document(self, artifact_id: UUID) -> dict[str, object]:
+        with Session(self.engine) as session, session.begin():
+            artifact = session.execute(
+                text(
+                    """SELECT id, original_object_key, recovery_object_key,
+                              lifecycle_state
+                       FROM source_artifacts
+                       WHERE id = :id AND user_id = :user_id
+                       FOR UPDATE"""
+                ),
+                {"id": artifact_id, "user_id": self.user_id},
+            ).mappings().one_or_none()
+            if artifact is None:
+                raise LedgerError("Document was not found")
+            if artifact["lifecycle_state"] != "redacted":
+                raise LedgerError("Only a deleted document can be restored")
+            original_key = artifact["original_object_key"]
+            recovery_key = artifact["recovery_object_key"]
+            if not original_key or not recovery_key or self.storage is None:
+                raise LedgerError("This document no longer has recoverable content")
+            self.storage.restore(str(recovery_key), str(original_key))
+            session.execute(
+                text(
+                    """UPDATE source_artifacts
+                       SET object_key = original_object_key,
+                           original_object_key = NULL,
+                           recovery_object_key = NULL,
+                           lifecycle_state = 'active',
+                           deleted_at = NULL,
+                           purge_after = NULL
+                       WHERE id = :id"""
+                ),
+                {"id": artifact_id},
+            )
+            session.execute(
+                text(
+                    """INSERT INTO audit_events
+                       (id, user_id, actor_type, action, target_type, target_id, result)
+                       VALUES (:id, :user_id, 'user', 'document.restore',
+                               'source_artifact', :target_id, 'success')"""
+                ),
+                {
+                    "id": uuid4(),
+                    "user_id": self.user_id,
+                    "target_id": artifact_id,
+                },
+            )
+        return {"id": artifact_id, "lifecycle_state": "active"}
+
     def cancel_import(self, import_id: UUID) -> None:
         with Session(self.engine) as session, session.begin():
             imported = session.execute(
@@ -475,6 +618,7 @@ class LedgerService:
         self,
         *,
         month: str | None = None,
+        period: str | None = None,
         account_id: UUID | None = None,
         account_type: str | None = None,
         category_id: UUID | None = None,
@@ -493,6 +637,8 @@ class LedgerService:
         if month:
             query += " AND to_char(t.transaction_date, 'YYYY-MM') = :month"
             parameters["month"] = month
+        elif period:
+            query, parameters = _apply_period_filter(query, parameters, "t.transaction_date", period)
         if account_id:
             query += " AND t.financial_account_id = :account_id"
             parameters["account_id"] = account_id
@@ -512,6 +658,7 @@ class LedgerService:
         self,
         *,
         month: str | None = None,
+        period: str | None = None,
         account_id: UUID | None = None,
         account_type: str | None = None,
         category_id: UUID | None = None,
@@ -531,6 +678,8 @@ class LedgerService:
         if month:
             query += " AND to_char(t.transaction_date, 'YYYY-MM') = :month"
             parameters["month"] = month
+        elif period:
+            query, parameters = _apply_period_filter(query, parameters, "t.transaction_date", period)
         if account_id:
             query += " AND t.financial_account_id = :account_id"
             parameters["account_id"] = account_id
@@ -615,6 +764,404 @@ class LedgerService:
         for row in rows:
             totals["expense" if row["direction"] == "debit" else "income"] += row["amount"]
         return {"month": month, "income": totals["income"], "expense": totals["expense"], "categories": rows}
+
+    def preferences(self) -> dict[str, object]:
+        with Session(self.engine) as session, session.begin():
+            session.execute(
+                text(
+                    """INSERT INTO user_preferences (user_id)
+                       VALUES (:user_id) ON CONFLICT (user_id) DO NOTHING"""
+                ),
+                {"user_id": self.user_id},
+            )
+            row = session.execute(
+                text(
+                    """SELECT reporting_period, retention_policy, updated_at
+                       FROM user_preferences WHERE user_id = :user_id"""
+                ),
+                {"user_id": self.user_id},
+            ).mappings().one()
+            return dict(row)
+
+    def update_reporting_period(self, period: str) -> dict[str, object]:
+        if period not in REPORTING_PERIODS:
+            raise LedgerError("Unsupported reporting period")
+        with Session(self.engine) as session, session.begin():
+            session.execute(
+                text(
+                    """INSERT INTO user_preferences (user_id, reporting_period)
+                       VALUES (:user_id, :period)
+                       ON CONFLICT (user_id) DO UPDATE
+                       SET reporting_period = EXCLUDED.reporting_period, updated_at = now()"""
+                ),
+                {"user_id": self.user_id, "period": period},
+            )
+        return self.preferences()
+
+    def update_retention_policy(self, payload: dict[str, object]) -> dict[str, object]:
+        policy: dict[str, int] = {}
+        limits = {
+            "source_artifacts_days": (30, 3650),
+            "statement_files_days": (30, 3650),
+        }
+        for field, (minimum, maximum) in limits.items():
+            try:
+                value = int(payload.get(field, 0))
+            except (TypeError, ValueError) as error:
+                raise LedgerError(f"{field} must be a whole number") from error
+            if not minimum <= value <= maximum:
+                raise LedgerError(f"{field} must be between {minimum} and {maximum} days")
+            policy[field] = value
+        with Session(self.engine) as session, session.begin():
+            session.execute(
+                text(
+                    """INSERT INTO user_preferences (user_id, retention_policy)
+                       VALUES (:user_id, CAST(:policy AS jsonb))
+                       ON CONFLICT (user_id) DO UPDATE
+                       SET retention_policy = EXCLUDED.retention_policy, updated_at = now()"""
+                ),
+                {"user_id": self.user_id, "policy": json.dumps(policy)},
+            )
+            session.execute(
+                text(
+                    """INSERT INTO audit_events
+                       (id, user_id, actor_type, action, target_type, target_id, result,
+                        safe_metadata)
+                       VALUES (:id, :user_id, 'user', 'privacy.retention.update',
+                               'user_preferences', :user_id, 'success', CAST(:policy AS jsonb))"""
+                ),
+                {
+                    "id": uuid4(),
+                    "user_id": self.user_id,
+                    "policy": json.dumps(policy),
+                },
+            )
+        return self.preferences()
+
+    def enforce_retention_policy(self) -> dict[str, int]:
+        policy = self.preferences()["retention_policy"]
+        if not isinstance(policy, dict):
+            raise LedgerError("Retention policy is invalid")
+        now = datetime.now(UTC)
+        source_cutoff = now - timedelta(days=int(policy["source_artifacts_days"]))
+        statement_cutoff = now - timedelta(days=int(policy["statement_files_days"]))
+        expired = self._rows(
+            """SELECT id FROM source_artifacts
+               WHERE user_id = :user_id AND lifecycle_state = 'active'
+                 AND object_key IS NOT NULL
+                 AND (
+                   (kind = 'gmail_message' AND created_at < :source_cutoff)
+                   OR
+                   (kind IN ('manual_upload', 'gmail_attachment')
+                    AND created_at < :statement_cutoff)
+                 )
+               ORDER BY created_at""",
+            {
+                "user_id": self.user_id,
+                "source_cutoff": source_cutoff,
+                "statement_cutoff": statement_cutoff,
+            },
+        )
+        redacted = 0
+        for artifact in expired:
+            self.redact_document(UUID(str(artifact["id"])))
+            redacted += 1
+
+        purgeable = self._rows(
+            """SELECT id, recovery_object_key FROM source_artifacts
+               WHERE user_id = :user_id AND lifecycle_state = 'redacted'
+                 AND recovery_object_key IS NOT NULL
+                 AND purge_after <= now()""",
+            {"user_id": self.user_id},
+        )
+        purged = 0
+        for artifact in purgeable:
+            if self.storage is None:
+                raise LedgerError("Document storage is unavailable")
+            self.storage.delete(str(artifact["recovery_object_key"]))
+            with Session(self.engine) as session, session.begin():
+                session.execute(
+                    text(
+                        """UPDATE source_artifacts
+                           SET recovery_object_key = NULL,
+                               original_object_key = NULL,
+                               lifecycle_state = 'purged'
+                           WHERE id = :id AND user_id = :user_id"""
+                    ),
+                    {"id": artifact["id"], "user_id": self.user_id},
+                )
+            purged += 1
+        return {"redacted": redacted, "purged": purged}
+
+    def privacy_inventory(self) -> dict[str, object]:
+        counts = self._one(
+            """SELECT
+                   (SELECT COUNT(*) FROM financial_accounts WHERE user_id = :user_id) AS accounts,
+                   (SELECT COUNT(*) FROM transactions WHERE user_id = :user_id) AS transactions,
+                   (SELECT COUNT(*) FROM source_artifacts WHERE user_id = :user_id
+                       AND lifecycle_state = 'active') AS stored_documents,
+                   (SELECT COUNT(*) FROM mailboxes WHERE user_id = :user_id
+                       AND connection_status = 'connected') AS connected_mailboxes""",
+            {"user_id": self.user_id},
+        )
+        return {**counts, "retention_policy": self.preferences()["retention_policy"]}
+
+    def privacy_export(self) -> dict[str, object]:
+        """Create a portable export that deliberately excludes secrets and raw files."""
+        user = self._one(
+            """SELECT id, email_normalized, display_name, default_currency,
+                      timezone, status, created_at, updated_at
+               FROM users WHERE id = :user_id""",
+            {"user_id": self.user_id},
+        )
+        collections = {
+            "financial_accounts": self._rows(
+                """SELECT id, account_type, institution_code, product_name, display_name,
+                          masked_identifier, currency, status, created_at, updated_at
+                   FROM financial_accounts WHERE user_id = :user_id ORDER BY created_at"""
+            ),
+            "transactions": self._rows(
+                """SELECT id, financial_account_id, transaction_date, posted_date,
+                          narration, amount, currency, direction, transaction_kind,
+                          reconciliation_state, provider_reference, merchant_normalized,
+                          category_id, category_source, created_at, updated_at
+                   FROM transactions WHERE user_id = :user_id
+                   ORDER BY transaction_date, id"""
+            ),
+            "categories": self._rows(
+                """SELECT id, code, name, parent_id, is_system, created_at, updated_at
+                   FROM categories WHERE user_id = :user_id ORDER BY name"""
+            ),
+            "budgets": self._rows(
+                """SELECT id, category_id, monthly_limit, active, created_at, updated_at
+                   FROM budgets WHERE user_id = :user_id ORDER BY created_at"""
+            ),
+            "recurring_payments": self._rows(
+                """SELECT id, financial_account_id, display_name, category_id, cadence,
+                          typical_amount, next_expected_on, confidence, state,
+                          created_at, updated_at
+                   FROM recurring_payment_detections
+                   WHERE user_id = :user_id ORDER BY created_at"""
+            ),
+            "mailboxes": self._rows(
+                """SELECT id, provider, display_email, connection_status, granted_scopes,
+                          last_successful_sync_at, created_at, updated_at
+                   FROM mailboxes WHERE user_id = :user_id ORDER BY created_at"""
+            ),
+            "documents": self.list_documents(),
+        }
+        with Session(self.engine) as session, session.begin():
+            session.execute(
+                text(
+                    """INSERT INTO audit_events
+                       (id, user_id, actor_type, action, target_type, target_id, result)
+                       VALUES (:id, :user_id, 'user', 'privacy.export',
+                               'user', :user_id, 'success')"""
+                ),
+                {"id": uuid4(), "user_id": self.user_id},
+            )
+        return {
+            "schema_version": 1,
+            "exported_on": date.today(),
+            "user": user,
+            **collections,
+        }
+
+    def period_report(self, period: str) -> dict[str, object]:
+        if period not in REPORTING_PERIODS:
+            raise LedgerError("Unsupported reporting period")
+        query = """SELECT COALESCE(parent.name, c.name, 'Uncategorized') AS category,
+                          t.direction, SUM(t.amount) AS amount
+                   FROM transactions t
+                   LEFT JOIN categories c ON c.id = t.category_id
+                   LEFT JOIN categories parent ON parent.id = c.parent_id
+                   WHERE t.user_id = :user_id
+                     AND t.transaction_kind NOT IN ('transfer', 'credit_card_payment')"""
+        parameters: dict[str, object] = {"user_id": self.user_id}
+        query, parameters = _apply_period_filter(query, parameters, "t.transaction_date", period)
+        rows = self._rows(
+            query
+            + """ GROUP BY COALESCE(parent.name, c.name, 'Uncategorized'), t.direction
+                  ORDER BY amount DESC""",
+            parameters,
+        )
+        totals = {"income": Decimal("0"), "expense": Decimal("0")}
+        for row in rows:
+            totals["expense" if row["direction"] == "debit" else "income"] += Decimal(str(row["amount"]))
+        start, end = _reporting_period_bounds(period)
+        return {
+            "period": period,
+            "date_from": start,
+            "date_to": end - timedelta(days=1) if end else None,
+            "income": totals["income"],
+            "expense": totals["expense"],
+            "categories": rows,
+        }
+
+    def list_budgets(self, month: str) -> list[dict[str, object]]:
+        _month_start_end(month)
+        rows = self._rows(
+            """SELECT b.id, b.category_id, c.name AS category, b.monthly_limit,
+                      b.active, COALESCE(spending.amount, 0) AS spent
+               FROM budgets b
+               JOIN categories c ON c.id = b.category_id
+               LEFT JOIN (
+                   SELECT COALESCE(category.parent_id, category.id) AS category_id,
+                          SUM(t.amount) AS amount
+                   FROM transactions t
+                   LEFT JOIN categories category ON category.id = t.category_id
+                   WHERE t.user_id = :user_id AND t.direction = 'debit'
+                     AND to_char(t.transaction_date, 'YYYY-MM') = :month
+                     AND t.transaction_kind NOT IN ('transfer', 'credit_card_payment')
+                   GROUP BY COALESCE(category.parent_id, category.id)
+               ) spending ON spending.category_id = b.category_id
+               WHERE b.user_id = :user_id
+               ORDER BY b.active DESC, c.name""",
+            {"user_id": self.user_id, "month": month},
+        )
+        results = []
+        for row in rows:
+            limit = Decimal(str(row["monthly_limit"]))
+            spent = Decimal(str(row["spent"]))
+            results.append(
+                {
+                    **row,
+                    "remaining": limit - spent,
+                    "percentage": spent / limit * Decimal("100"),
+                    "over_budget": spent > limit,
+                }
+            )
+        return results
+
+    def create_budget(self, payload: dict[str, object]) -> dict[str, object]:
+        category_id = UUID(str(payload.get("category_id")))
+        limit = _positive_decimal(payload.get("monthly_limit"), "monthly_limit")
+        category = self._one(
+            """SELECT id, parent_id FROM categories
+               WHERE id = :id AND user_id = :user_id""",
+            {"id": category_id, "user_id": self.user_id},
+        )
+        if category["parent_id"] is not None:
+            raise LedgerError("Budgets must use a top-level category")
+        budget_id = uuid4()
+        with Session(self.engine) as session, session.begin():
+            session.execute(
+                text(
+                    """INSERT INTO budgets
+                       (id, user_id, category_id, monthly_limit, active)
+                       VALUES (:id, :user_id, :category_id, :monthly_limit, true)
+                       ON CONFLICT (user_id, category_id) DO UPDATE
+                       SET monthly_limit = EXCLUDED.monthly_limit,
+                           active = true, updated_at = now()"""
+                ),
+                {
+                    "id": budget_id,
+                    "user_id": self.user_id,
+                    "category_id": category_id,
+                    "monthly_limit": limit,
+                },
+            )
+        return self._one(
+            """SELECT b.id, b.category_id, c.name AS category, b.monthly_limit, b.active
+               FROM budgets b JOIN categories c ON c.id = b.category_id
+               WHERE b.user_id = :user_id AND b.category_id = :category_id""",
+            {"user_id": self.user_id, "category_id": category_id},
+        )
+
+    def update_budget(self, budget_id: UUID, payload: dict[str, object]) -> dict[str, object]:
+        fields: list[str] = []
+        parameters: dict[str, object] = {"id": budget_id, "user_id": self.user_id}
+        if "monthly_limit" in payload:
+            fields.append("monthly_limit = :monthly_limit")
+            parameters["monthly_limit"] = _positive_decimal(payload["monthly_limit"], "monthly_limit")
+        if "active" in payload:
+            fields.append("active = :active")
+            parameters["active"] = bool(payload["active"])
+        if not fields:
+            raise LedgerError("No budget changes were provided")
+        with Session(self.engine) as session, session.begin():
+            result = session.execute(
+                text(
+                    f"""UPDATE budgets SET {", ".join(fields)}, updated_at = now()
+                        WHERE id = :id AND user_id = :user_id"""
+                ),
+                parameters,
+            )
+            if result.rowcount != 1:
+                raise LedgerError("Requested budget was not found")
+        return self._one(
+            """SELECT b.id, b.category_id, c.name AS category, b.monthly_limit, b.active
+               FROM budgets b JOIN categories c ON c.id = b.category_id
+               WHERE b.id = :id AND b.user_id = :user_id""",
+            {"id": budget_id, "user_id": self.user_id},
+        )
+
+    def delete_budget(self, budget_id: UUID) -> None:
+        with Session(self.engine) as session, session.begin():
+            result = session.execute(
+                text("DELETE FROM budgets WHERE id = :id AND user_id = :user_id"),
+                {"id": budget_id, "user_id": self.user_id},
+            )
+            if result.rowcount != 1:
+                raise LedgerError("Requested budget was not found")
+
+    def spending_summary(self) -> dict[str, object]:
+        """Return all-time expense categories grouped at the parent level."""
+        rows = self._rows(
+            """SELECT COALESCE(parent.id, c.id) AS category_id,
+                       COALESCE(parent.name, c.name, 'Uncategorized') AS category,
+                       SUM(t.amount) AS amount
+                FROM transactions t
+                LEFT JOIN categories c ON c.id = t.category_id
+                LEFT JOIN categories parent ON parent.id = c.parent_id
+                WHERE t.user_id = :user_id
+                  AND t.direction = 'debit'
+                  AND t.transaction_kind NOT IN ('transfer', 'credit_card_payment')
+                GROUP BY COALESCE(parent.id, c.id), COALESCE(parent.name, c.name, 'Uncategorized')
+                ORDER BY amount DESC""",
+            {"user_id": self.user_id},
+        )
+        total = sum((Decimal(str(row["amount"])) for row in rows), Decimal("0"))
+        categories = [
+            {**row, "percentage": (Decimal(str(row["amount"])) / total * Decimal("100")) if total else Decimal("0")}
+            for row in rows
+        ]
+        return {"expense": total, "categories": categories}
+
+    def spending_category_trend(self, category_id: UUID, granularity: str) -> dict[str, object]:
+        """Return the complete available monthly or yearly series for a category."""
+        if granularity == "monthly":
+            rows = self._rows(
+                """SELECT to_char(t.transaction_date, 'YYYY-MM') AS period, SUM(t.amount) AS amount
+                    FROM transactions t LEFT JOIN categories c ON c.id = t.category_id
+                    WHERE t.user_id = :user_id AND t.direction = 'debit'
+                      AND COALESCE(c.parent_id, c.id) = :category_id
+                      AND t.transaction_kind NOT IN ('transfer', 'credit_card_payment')
+                    GROUP BY period ORDER BY period""",
+                {"user_id": self.user_id, "category_id": category_id},
+            )
+            amounts = {str(row["period"]): Decimal(str(row["amount"])) for row in rows}
+            points = []
+            if rows:
+                start = date.fromisoformat(f"{rows[0]['period']}-01")
+                end = date.fromisoformat(f"{rows[-1]['period']}-01")
+                point = start
+                while point <= end:
+                    key = point.strftime("%Y-%m")
+                    points.append({"period": key, "amount": amounts.get(key, Decimal("0"))})
+                    point = date(point.year + (point.month == 12), 1 if point.month == 12 else point.month + 1, 1)
+        else:
+            rows = self._rows(
+                """SELECT to_char(t.transaction_date, 'YYYY') AS period, SUM(t.amount) AS amount
+                    FROM transactions t LEFT JOIN categories c ON c.id = t.category_id
+                    WHERE t.user_id = :user_id AND t.direction = 'debit'
+                      AND COALESCE(c.parent_id, c.id) = :category_id
+                      AND t.transaction_kind NOT IN ('transfer', 'credit_card_payment')
+                    GROUP BY period ORDER BY period""",
+                {"user_id": self.user_id, "category_id": category_id},
+            )
+            points = [{"period": str(row["period"]), "amount": Decimal(str(row["amount"]))} for row in rows]
+        return {"category_id": category_id, "granularity": granularity, "points": points}
 
     def monthly_insights(self, month: str) -> dict[str, object]:
         """Return deterministic, evidence-linked month insights.
@@ -748,11 +1295,34 @@ class LedgerService:
         if state:
             query += " AND r.state = :state"
             parameters["state"] = state
-        return self._rows(query + " ORDER BY r.next_expected_on, r.display_name", parameters)
+        rows = self._rows(query + " ORDER BY r.next_expected_on, r.display_name", parameters)
+        subscription_hints = {
+            "netflix", "spotify", "youtube", "icloud", "adobe", "microsoft",
+            "prime", "membership", "openai", "chatgpt", "canva", "notion",
+        }
+        cadence_factor = {
+            "weekly": Decimal("52") / Decimal("12"),
+            "monthly": Decimal("1"),
+            "quarterly": Decimal("1") / Decimal("3"),
+            "yearly": Decimal("1") / Decimal("12"),
+        }
+        return [
+            {
+                **row,
+                "kind": "subscription"
+                if "subscription" in str(row["category"] or "").lower()
+                or any(hint in str(row["merchant_key"]) for hint in subscription_hints)
+                else "recurring",
+                "monthly_equivalent": (
+                    Decimal(str(row["typical_amount"])) * cadence_factor[str(row["cadence"])]
+                ).quantize(Decimal("0.01")),
+            }
+            for row in rows
+        ]
 
     def review_recurring_payment(self, detection_id: UUID, state: str) -> dict[str, object]:
-        if state not in {"confirmed", "dismissed"}:
-            raise LedgerError("Recurring payment state must be confirmed or dismissed")
+        if state not in {"detected", "confirmed", "dismissed"}:
+            raise LedgerError("Recurring payment state is invalid")
         with Session(self.engine) as session, session.begin():
             result = session.execute(text("""UPDATE recurring_payment_detections
                 SET state = :state, updated_at = now() WHERE id = :id AND user_id = :user_id"""),
@@ -760,6 +1330,169 @@ class LedgerService:
             if result.rowcount != 1:
                 raise LedgerError("Recurring payment detection was not found")
         return self._one("SELECT * FROM recurring_payment_detections WHERE id = :id AND user_id = :user_id", {"id": detection_id, "user_id": self.user_id})
+
+    def update_recurring_payment(self, detection_id: UUID, payload: dict[str, object]) -> dict[str, object]:
+        fields: list[str] = []
+        parameters: dict[str, object] = {"id": detection_id, "user_id": self.user_id}
+        if "display_name" in payload:
+            fields.append("display_name = :display_name")
+            parameters["display_name"] = _required_text(payload, "display_name")
+        if "typical_amount" in payload:
+            fields.append("typical_amount = :typical_amount")
+            parameters["typical_amount"] = _positive_decimal(payload["typical_amount"], "typical_amount")
+        if "next_expected_on" in payload:
+            fields.append("next_expected_on = :next_expected_on")
+            try:
+                parameters["next_expected_on"] = date.fromisoformat(str(payload["next_expected_on"]))
+            except ValueError as error:
+                raise LedgerError("next_expected_on must use YYYY-MM-DD format") from error
+        if not fields:
+            raise LedgerError("No recurring-payment changes were provided")
+        with Session(self.engine) as session, session.begin():
+            result = session.execute(
+                text(
+                    f"""UPDATE recurring_payment_detections
+                        SET {", ".join(fields)}, updated_at = now()
+                        WHERE id = :id AND user_id = :user_id"""
+                ),
+                parameters,
+            )
+            if result.rowcount != 1:
+                raise LedgerError("Recurring payment detection was not found")
+        return self._one(
+            "SELECT * FROM recurring_payment_detections WHERE id = :id AND user_id = :user_id",
+            {"id": detection_id, "user_id": self.user_id},
+        )
+
+    def list_card_statements(self) -> list[dict[str, object]]:
+        return self._rows(
+            """SELECT s.id, s.financial_account_id, a.display_name AS account_name,
+                      a.institution_code, s.period_start, s.period_end,
+                      s.statement_amount, s.minimum_due, s.due_date,
+                      s.total_limit, s.available_limit, s.state,
+                      COALESCE(p.status, 'unpaid') AS payment_status,
+                      COALESCE(p.paid_amount, 0) AS paid_amount, p.paid_at
+               FROM statements s
+               JOIN financial_accounts a ON a.id = s.financial_account_id
+               LEFT JOIN card_statement_payments p ON p.statement_id = s.id
+               WHERE s.user_id = :user_id AND a.account_type = 'credit_card'
+                 AND s.state IN ('confirmed', 'reconciled')
+               ORDER BY s.due_date DESC NULLS LAST, s.period_end DESC NULLS LAST"""
+        )
+
+    def update_card_statement_payment(self, statement_id: UUID, payload: dict[str, object]) -> dict[str, object]:
+        status = _required_choice(payload, "status", {"unpaid", "partial", "paid"})
+        paid_amount = Decimal("0")
+        if payload.get("paid_amount") not in (None, ""):
+            try:
+                paid_amount = Decimal(str(payload["paid_amount"]))
+            except InvalidOperation as error:
+                raise LedgerError("paid_amount must be a valid amount") from error
+            if paid_amount < 0:
+                raise LedgerError("paid_amount cannot be negative")
+        self._one(
+            """SELECT s.id FROM statements s JOIN financial_accounts a
+               ON a.id = s.financial_account_id
+               WHERE s.id = :id AND s.user_id = :user_id
+                 AND a.account_type = 'credit_card'""",
+            {"id": statement_id, "user_id": self.user_id},
+        )
+        with Session(self.engine) as session, session.begin():
+            session.execute(
+                text(
+                    """INSERT INTO card_statement_payments
+                       (id, user_id, statement_id, status, paid_amount, paid_at)
+                       VALUES (:id, :user_id, :statement_id, :status, :paid_amount,
+                               CASE WHEN :status = 'paid' THEN now() ELSE NULL END)
+                       ON CONFLICT (statement_id) DO UPDATE
+                       SET status = EXCLUDED.status, paid_amount = EXCLUDED.paid_amount,
+                           paid_at = CASE WHEN EXCLUDED.status = 'paid' THEN now() ELSE NULL END,
+                           updated_at = now()"""
+                ),
+                {
+                    "id": uuid4(),
+                    "user_id": self.user_id,
+                    "statement_id": statement_id,
+                    "status": status,
+                    "paid_amount": paid_amount,
+                },
+            )
+        return self._one(
+            """SELECT statement_id, status, paid_amount, paid_at
+               FROM card_statement_payments
+               WHERE statement_id = :id AND user_id = :user_id""",
+            {"id": statement_id, "user_id": self.user_id},
+        )
+
+    def generate_card_reminders(self, today: date | None = None) -> dict[str, int]:
+        current = today or date.today()
+        statements = self._rows(
+            """SELECT s.id, a.display_name AS account_name, s.statement_amount,
+                      s.minimum_due, s.due_date, COALESCE(p.status, 'unpaid') AS payment_status
+               FROM statements s JOIN financial_accounts a ON a.id = s.financial_account_id
+               LEFT JOIN card_statement_payments p ON p.statement_id = s.id
+               WHERE s.user_id = :user_id AND a.account_type = 'credit_card'
+                 AND s.due_date IS NOT NULL AND s.state IN ('confirmed', 'reconciled')
+                 AND COALESCE(p.status, 'unpaid') <> 'paid'
+                 AND s.due_date <= :deadline""",
+            {"user_id": self.user_id, "deadline": current + timedelta(days=7)},
+        )
+        created = 0
+        with Session(self.engine) as session, session.begin():
+            for statement in statements:
+                overdue = statement["due_date"] < current
+                kind = "card_payment_overdue" if overdue else "card_payment_upcoming"
+                result = session.execute(
+                    text(
+                        """INSERT INTO notifications
+                           (id, user_id, notification_kind, deduplication_key,
+                            title, body, due_at)
+                           VALUES (:id, :user_id, :kind, :key, :title, :body, :due_at)
+                           ON CONFLICT (user_id, notification_kind, deduplication_key)
+                           DO NOTHING"""
+                    ),
+                    {
+                        "id": uuid4(),
+                        "user_id": self.user_id,
+                        "kind": kind,
+                        "key": str(statement["id"]),
+                        "title": f"{statement['account_name']} payment {'overdue' if overdue else 'due soon'}",
+                        "body": (
+                            f"Statement amount {statement['statement_amount'] or 0}; "
+                            f"minimum due {statement['minimum_due'] or 0}."
+                        ),
+                        "due_at": statement["due_date"],
+                    },
+                )
+                created += result.rowcount
+        return {"created": created, "eligible": len(statements)}
+
+    def list_notifications(self, state: str | None = None) -> list[dict[str, object]]:
+        query = """SELECT id, notification_kind, title, body, state, due_at, created_at
+                   FROM notifications WHERE user_id = :user_id"""
+        parameters: dict[str, object] = {"user_id": self.user_id}
+        if state:
+            query += " AND state = :state"
+            parameters["state"] = state
+        return self._rows(query + " ORDER BY due_at NULLS LAST, created_at DESC", parameters)
+
+    def update_notification(self, notification_id: UUID, state: str) -> dict[str, object]:
+        if state not in {"unread", "read", "dismissed"}:
+            raise LedgerError("Notification state is invalid")
+        with Session(self.engine) as session, session.begin():
+            result = session.execute(
+                text(
+                    """UPDATE notifications SET state = :state, updated_at = now()
+                       WHERE id = :id AND user_id = :user_id"""
+                ),
+                {"id": notification_id, "user_id": self.user_id, "state": state},
+            )
+            if result.rowcount != 1:
+                raise LedgerError("Notification was not found")
+        return self._one(
+            "SELECT * FROM notifications WHERE id = :id AND user_id = :user_id",
+            {"id": notification_id, "user_id": self.user_id},
+        )
 
     def balance_summary(self) -> dict[str, object]:
         rows = self._rows(
@@ -811,6 +1544,64 @@ def _recurrence_cadence(intervals: list[int]) -> tuple[str, int] | None:
         if abs(candidate - target) <= allowed_variance and all(abs(interval - target) <= allowed_variance for interval in intervals):
             return name, target
     return None
+
+
+def _reporting_period_bounds(period: str, today: date | None = None) -> tuple[date | None, date | None]:
+    if period not in REPORTING_PERIODS:
+        raise LedgerError("Unsupported reporting period")
+    if period == "all_time":
+        return None, None
+    current = today or date.today()
+    current_month = date(current.year, current.month, 1)
+    next_month = _shift_month(current_month, 1)
+    if period == "this_month":
+        return current_month, next_month
+    if period == "last_month":
+        return _shift_month(current_month, -1), current_month
+    if period == "last_3_months":
+        return _shift_month(current_month, -2), next_month
+    if period == "last_6_months":
+        return _shift_month(current_month, -5), next_month
+    return date(current.year, 1, 1), date(current.year + 1, 1, 1)
+
+
+def _shift_month(value: date, offset: int) -> date:
+    month_index = value.year * 12 + value.month - 1 + offset
+    return date(month_index // 12, month_index % 12 + 1, 1)
+
+
+def _apply_period_filter(
+    query: str,
+    parameters: dict[str, object],
+    column: str,
+    period: str,
+) -> tuple[str, dict[str, object]]:
+    start, end = _reporting_period_bounds(period)
+    if start is not None:
+        query += f" AND {column} >= :period_start"
+        parameters["period_start"] = start
+    if end is not None:
+        query += f" AND {column} < :period_end"
+        parameters["period_end"] = end
+    return query, parameters
+
+
+def _month_start_end(month: str) -> tuple[date, date]:
+    try:
+        start = date.fromisoformat(f"{month}-01")
+    except ValueError as error:
+        raise LedgerError("Month must use YYYY-MM format") from error
+    return start, _shift_month(start, 1)
+
+
+def _positive_decimal(value: object, field: str) -> Decimal:
+    try:
+        amount = Decimal(str(value))
+    except (InvalidOperation, TypeError) as error:
+        raise LedgerError(f"{field} must be a valid amount") from error
+    if not amount.is_finite() or amount <= 0:
+        raise LedgerError(f"{field} must be greater than zero")
+    return amount
 
 
 def inspect_tabular_upload(filename: str, content: bytes) -> dict[str, object]:
