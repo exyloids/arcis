@@ -34,7 +34,17 @@ class SyncJobsPostgresTests(unittest.TestCase):
 
         self.assertEqual(first["id"], second["id"])
         self.assertEqual(first["state"], "queued")
-        self.assertEqual(first["progress"], {"mailbox_id": str(self.mailbox["id"])})
+        self.assertEqual(
+            first["progress"],
+            {"mailbox_id": str(self.mailbox["id"]), "mode": "incremental"},
+        )
+
+    def test_discovery_and_incremental_jobs_have_independent_idempotency(self) -> None:
+        sync = self.service.request_sync(self.mailbox["id"])
+        discovery = self.service.request_discovery(self.mailbox["id"])
+
+        self.assertNotEqual(sync["id"], discovery["id"])
+        self.assertEqual(discovery["progress"]["mode"], "discovery")
 
     def test_worker_claims_once_and_records_terminal_state(self) -> None:
         queued = self.service.request_sync(self.mailbox["id"])
@@ -48,3 +58,7 @@ class SyncJobsPostgresTests(unittest.TestCase):
         completed = self.service.finish(claimed["id"], {"scanned": 0, "added": 0})
         self.assertEqual(completed["state"], "completed")
         self.assertEqual(completed["progress"], {"scanned": 0, "added": 0})
+        notifications = LedgerService(self.engine, self.user_id).list_notifications("unread")
+        self.assertEqual(len(notifications), 1)
+        self.assertEqual(notifications[0]["notification_kind"], "gmail_scan_completed")
+        self.assertEqual(notifications[0]["title"], "Gmail scan complete")

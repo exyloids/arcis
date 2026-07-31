@@ -6,11 +6,172 @@ Phase 5 — Everyday controls, trust, and polish
 
 ## Current task
 
-The initial Phase 5 implementation is complete except for full user/account
-erasure and final real-data visual sign-off. Full erasure remains coupled to
-the production authentication and re-authentication workflow; the current
-single-user demo does not expose an unsafe unauthenticated delete-account
-operation.
+Gmail-first account and card discovery is implemented. A connected mailbox can
+be scanned asynchronously for supported institution alerts; detected products
+must be confirmed before accounts or transactions are created. Rejected
+products remain suppressed for future matching alerts and can be reconsidered.
+The remaining Phase 5 work is full user/account erasure and final real-data
+visual sign-off. The user-facing Documents section has been removed; source
+files remain private implementation evidence governed through privacy controls.
+
+## Actionable notifications and statement-confirmed balances
+
+- The app now has a dedicated Notifications destination and an unread badge in
+  the global header. Completed Gmail jobs create a concise scan-result
+  notification.
+- Gmail PDF attachments are inspected for supported savings-account statement
+  signals. Arcis keeps one actionable notification for the most recent
+  statement per institution and avoids routing recognized credit-card
+  statements into the savings-balance workflow.
+- Opening the notification asks the user to select the savings account when it
+  cannot be inferred safely and to confirm the PDF password. Arcis derives a
+  safe instruction such as “Use your Customer ID” from the source email, but
+  never copies an explicit password, customer ID, account number, or other
+  credential value. The entered password is sent only to the preview operation.
+- After the user reviews and confirms the preview, the existing reconciliation
+  pipeline records the statement baseline and recalculates the available bank
+  balance from the closing balance plus newer activity.
+- The former Documents page and the long manual Gmail-attachment picker were
+  removed. Uploaded and emailed files remain internal evidence with retention
+  and recovery controls.
+- SBI consolidated statements now use account-type boundaries before parsing.
+  Only Savings/SB/SBCHQ sections contribute transactions or the closing-balance
+  baseline; Demand Loan, Term Loan, DL, and TL sections are ignored.
+
+## Vendor category propagation and statement-backed balances
+
+- Transactions now persist a parent category and optional subcategory
+  independently. Selecting a subcategory also selects its parent, and ledger
+  labels render as `Category (Subcategory)`.
+- The tagging dialog provides live category/subcategory search, highlights the
+  selected child, ranks categories by transaction relevance and historical
+  usage, and exposes the five most-used categories as quick choices.
+- Category usage counts are user-scoped. Merchant overrides and confirmed bulk
+  propagation preserve both category levels.
+- A manual transaction category now creates or updates the highest-priority
+  normalized merchant override, so later Gmail and statement transactions from
+  the same vendor receive the category deterministically.
+- After the selected transaction is saved, the UI reports the exact number of
+  other uncategorized transactions with the same normalized merchant and asks
+  before applying the category in bulk. Existing categorized transactions are
+  never overwritten by this action.
+- The UI requests a fresh match preview after the category save instead of
+  relying on fields in the update response. This also makes propagation
+  recoverable by reopening and saving an already categorized transaction.
+  Real-data verification detected all 10 older uncategorized transactions for
+  a recurring vendor whose narration varied only by punctuation.
+- Gmail synchronization stores PDF attachments privately and raises an
+  actionable notification for the most recent supported savings statement.
+  The account selector and ephemeral PDF-password field are shown only when the
+  user opens that notification.
+- Savings balances no longer assume that an account started at zero. Arcis uses
+  the latest confirmed statement closing balance and rolls it forward with
+  transactions dated after the statement period. Without a confirmed baseline,
+  the account is labelled **Balance unavailable** and excluded from the
+  confirmed bank-balance total instead of showing a misleading negative value.
+- Bank-statement parsing now extracts statement-period ranges and can derive the
+  closing balance from the final running-balance column when no labelled
+  closing-balance field is present.
+
+Verification completed on 2026-07-30:
+
+```bash
+.venv/bin/ruff check apps/api/main.py packages/backend/arcis_backend/ledger.py \
+  packages/backend/arcis_backend/statements.py tests/test_pdf_statement_parser.py \
+  tests/integration/test_manual_ledger_postgres.py
+.venv/bin/python -m unittest tests.test_pdf_statement_parser -v
+ARCIS_INTEGRATION_DATABASE_URL=postgresql+psycopg://arcis:arcis@localhost:5432/arcis \
+  .venv/bin/python -m unittest \
+  tests.integration.test_manual_ledger_postgres.ManualLedgerPostgresTests.test_bank_balance_requires_a_statement_baseline_and_rolls_forward_newer_activity \
+  tests.integration.test_manual_ledger_postgres.ManualLedgerPostgresTests.test_manual_category_can_be_confirmed_for_uncategorized_vendor_matches -v
+(cd apps/web && npm run build)
+```
+
+Result: Ruff passed; 81 runnable/default tests passed with 15 opt-in integration
+tests skipped; both selected PostgreSQL integration tests passed; the Next.js
+production build passed; and all 12 desktop/tablet/mobile browser journeys
+passed, including the vendor-match confirmation flow.
+
+## Gmail-first product onboarding
+
+- Added durable `pending`, `confirmed`, and `rejected` financial-product
+  discoveries, keyed per user by institution, account type, and last four.
+- Added a Celery-backed bounded Gmail discovery job so historical scanning does
+  not hold an HTTP request open.
+- Pending candidates are quarantined from the canonical ledger. Confirmation
+  creates the account and imports all linked alerts; future alerts materialize
+  automatically.
+- Product identity detection is independent of complete transaction parsing.
+  Explicit HDFC/ICICI account or card context can therefore create a pending
+  product suggestion while an unsupported alert remains quarantined.
+- Rejection suppresses current and future matching alerts. **Review again**
+  explicitly returns the product to pending.
+- The Mailboxes page now presents detected products with editable product name,
+  display name, and currency. Manual account creation remains a fallback.
+- Confirmed accounts and cards can be edited or removed from their respective
+  pages. Removal archives the product, suppresses future linked Gmail alerts,
+  and retains accepted history for audit and historical reporting.
+- Added unit and PostgreSQL lifecycle coverage for detection identity,
+  independent discovery-job idempotency, rejection persistence, confirmation,
+  and transaction gating.
+- Reviewed 392 locally downloaded RFC 822 messages without copying personal
+  financial content into the repository. Discovery now recognizes current
+  HDFC, ICICI, YES BANK, SBI, DCB, and OneCard sender domains and HTML-only
+  bodies.
+- Product matching requires a monetary amount, a concrete transaction event,
+  and explicit account/card context. It retains only ending four digits and
+  rejects starting digits, customer IDs, debit-card-only identifiers, sender
+  suffix spoofing, and instructional messages that merely mention last-four
+  digits.
+- Private aggregate validation against user-supplied product ground truth
+  matched every product for which a supported top-level email body was present.
+  One supplied card appeared only inside forwarded/nested content and one
+  supplied savings account had no decoded email-body evidence in the reviewed
+  corpus, so neither is guessed.
+
+Verification completed on 2026-07-30:
+
+```bash
+.venv/bin/ruff check apps packages migrations scripts spikes tests
+.venv/bin/python -m unittest discover -s tests -p 'test_*.py' -v
+ARCIS_INTEGRATION_DATABASE_URL=postgresql+psycopg://arcis:arcis@localhost:5432/arcis \
+  .venv/bin/python -m unittest \
+  tests.integration.test_account_discovery_postgres \
+  tests.integration.test_sync_jobs_postgres -v
+```
+
+Result: lint passed; 74 runnable tests passed with 13 opt-in tests skipped by
+the default suite; all five selected PostgreSQL discovery and job tests passed.
+
+Real-mailbox verification on 2026-07-30 reprocessed 908 matching messages
+without duplicating source artifacts. The corrected detector surfaced both an
+HDFC savings account and ICICI savings-account candidates as pending products;
+no newly detected product was confirmed automatically.
+
+The follow-up verification passed Ruff, 60 runnable unit/default tests, eight
+selected PostgreSQL discovery/account-lifecycle tests, and the Next.js
+production build. All 12 desktop/tablet/mobile browser journeys passed.
+Thirteen opt-in integration tests were skipped by the default suite as
+expected.
+
+Verification completed on 2026-07-29:
+
+```bash
+.venv/bin/ruff check apps packages migrations scripts spikes tests
+.venv/bin/python -m unittest discover -s tests -p 'test_*.py' -v
+ARCIS_INTEGRATION_DATABASE_URL=postgresql+psycopg://arcis:arcis@localhost:5432/arcis \
+  .venv/bin/python -m unittest \
+  tests.integration.test_account_discovery_postgres \
+  tests.integration.test_sync_jobs_postgres -v
+(cd apps/web && npm run build)
+(cd apps/web && npm run test:e2e)
+docker-compose -f deploy/compose/docker-compose.yml exec -T api alembic current
+```
+
+Result: lint passed; 56 runnable tests passed with 11 opt-in integration tests
+skipped in the default suite; all four selected PostgreSQL lifecycle/job tests
+passed; the Next.js production build and all nine desktop/tablet/mobile browser
+journeys passed; and Alembic reached `0015_gmail_account_discovery`.
 
 ## Phase 5 everyday controls
 
@@ -23,9 +184,9 @@ operation.
   editable states, with next-date and monthly/annual commitment totals.
 - Credit-card statements expose amount, minimum due, due date, payment status,
   and idempotent upcoming/overdue in-app reminders.
-- The document vault combines manual uploads and Gmail artifacts without
-  exposing raw content. Deletion moves bytes to a private recovery key for 30
-  days; restore copies bytes back to the original key.
+- Manual uploads and Gmail artifacts remain internal source evidence rather
+  than a user-facing document browser. Deletion moves bytes to a private
+  recovery key for 30 days; restore copies bytes back to the original key.
 - Privacy controls provide a safe metadata/ledger export, Gmail disconnect,
   per-source deletion and restoration, configurable retention, immediate
   enforcement, and daily scheduled enforcement. Full account erasure remains

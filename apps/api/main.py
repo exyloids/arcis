@@ -16,7 +16,7 @@ from arcis_backend.sync_jobs import GmailSyncJobService, SyncJobError
 from arcis_contracts.health import HealthResponse, ReadinessResponse
 from fastapi import FastAPI, File, Form, HTTPException, Query, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import RedirectResponse
+from fastapi.responses import RedirectResponse, Response
 from redis import Redis
 from sqlalchemy import text
 
@@ -142,6 +142,27 @@ def create_account(payload: dict[str, object]) -> dict[str, object]:
         raise ledger_error(error) from error
 
 
+@app.patch("/api/v1/financial-accounts/{account_id}", tags=["accounts"])
+def update_account(account_id: UUID, payload: dict[str, object]) -> dict[str, object]:
+    try:
+        return ledger.update_account(account_id, payload)
+    except LedgerError as error:
+        raise ledger_error(error) from error
+
+
+@app.delete(
+    "/api/v1/financial-accounts/{account_id}",
+    status_code=204,
+    tags=["accounts"],
+)
+def archive_account(account_id: UUID) -> Response:
+    try:
+        ledger.archive_account(account_id)
+    except LedgerError as error:
+        raise ledger_error(error) from error
+    return Response(status_code=204)
+
+
 @app.get("/api/v1/categories", tags=["categories"])
 def list_categories() -> list[dict[str, object]]:
     return ledger.list_categories()
@@ -249,6 +270,42 @@ def parser_candidate_metrics() -> list[dict[str, object]]:
     return candidates.metrics()
 
 
+@app.get("/api/v1/discovered-accounts", tags=["mailboxes"])
+def list_discovered_accounts(
+    state: str | None = Query(default=None, pattern=r"^(pending|confirmed|rejected)$"),
+) -> list[dict[str, object]]:
+    return candidates.list_discovered_accounts(state)
+
+
+@app.post("/api/v1/discovered-accounts/{discovery_id}/confirm", tags=["mailboxes"])
+def confirm_discovered_account(
+    discovery_id: UUID,
+    payload: dict[str, object],
+) -> dict[str, object]:
+    try:
+        result = candidates.confirm_discovered_account(discovery_id, payload)
+        ledger.categorize_transactions()
+        return result
+    except ValueError as error:
+        raise HTTPException(status_code=422, detail=str(error)) from error
+
+
+@app.post("/api/v1/discovered-accounts/{discovery_id}/reject", tags=["mailboxes"])
+def reject_discovered_account(discovery_id: UUID) -> dict[str, object]:
+    try:
+        return candidates.reject_discovered_account(discovery_id)
+    except ValueError as error:
+        raise HTTPException(status_code=422, detail=str(error)) from error
+
+
+@app.post("/api/v1/discovered-accounts/{discovery_id}/reconsider", tags=["mailboxes"])
+def reconsider_discovered_account(discovery_id: UUID) -> dict[str, object]:
+    try:
+        return candidates.reconsider_discovered_account(discovery_id)
+    except ValueError as error:
+        raise HTTPException(status_code=422, detail=str(error)) from error
+
+
 @app.post("/api/v1/parser-candidates/{candidate_id}/review", tags=["mailboxes"])
 def review_parser_candidate(candidate_id: UUID, payload: dict[str, str]) -> dict[str, object]:
     try:
@@ -330,6 +387,20 @@ def backfill_mailbox(mailbox_id: UUID, payload: dict[str, object]) -> dict[str, 
         )
     except (SyncJobError, ValueError) as error:
         raise HTTPException(status_code=422, detail=str(error)) from error
+
+
+@app.post(
+    "/api/v1/mailboxes/{mailbox_id}/discover-accounts",
+    status_code=202,
+    tags=["mailboxes"],
+)
+def discover_mailbox_accounts(mailbox_id: UUID) -> dict[str, object]:
+    try:
+        job = sync_jobs.request_discovery(mailbox_id)
+        celery_app.send_task("arcis.gmail.run_next")
+        return job
+    except SyncJobError as error:
+        raise sync_job_error(error) from error
 
 
 @app.get("/api/v1/sync-jobs/{job_id}", tags=["mailboxes"])
@@ -474,6 +545,7 @@ def list_transactions(
     account_id: UUID | None = None,
     account_type: str | None = Query(default=None, pattern=r"^(bank_account|credit_card)$"),
     category_id: UUID | None = None,
+    uncategorized: bool = False,
     q: str | None = Query(default=None, min_length=1, max_length=100),
     limit: int = Query(default=100, ge=1, le=200),
 ) -> list[dict[str, object]]:
@@ -483,6 +555,7 @@ def list_transactions(
         account_id=account_id,
         account_type=account_type,
         category_id=category_id,
+        uncategorized=uncategorized,
         query_text=q,
         limit=limit,
     )
@@ -498,6 +571,7 @@ def transaction_page(
     account_id: UUID | None = None,
     account_type: str | None = Query(default=None, pattern=r"^(bank_account|credit_card)$"),
     category_id: UUID | None = None,
+    uncategorized: bool = False,
     q: str | None = Query(default=None, min_length=1, max_length=100),
     cursor: str | None = Query(default=None, max_length=200),
     limit: int = Query(default=50, ge=1, le=200),
@@ -509,6 +583,7 @@ def transaction_page(
             account_id=account_id,
             account_type=account_type,
             category_id=category_id,
+            uncategorized=uncategorized,
             query_text=q,
             cursor=cursor,
             limit=limit,
@@ -526,6 +601,22 @@ def get_transaction_evidence(transaction_id: UUID) -> list[dict[str, object]]:
 def update_transaction(transaction_id: UUID, payload: dict[str, object]) -> dict[str, object]:
     try:
         return ledger.update_transaction(transaction_id, payload)
+    except LedgerError as error:
+        raise ledger_error(error) from error
+
+
+@app.post("/api/v1/transactions/{transaction_id}/category-matches", tags=["ledger"])
+def apply_category_to_matching_transactions(transaction_id: UUID) -> dict[str, object]:
+    try:
+        return ledger.apply_category_to_matching_transactions(transaction_id)
+    except LedgerError as error:
+        raise ledger_error(error) from error
+
+
+@app.get("/api/v1/transactions/{transaction_id}/category-matches", tags=["ledger"])
+def preview_matching_transactions(transaction_id: UUID) -> dict[str, object]:
+    try:
+        return ledger.category_match_preview(transaction_id)
     except LedgerError as error:
         raise ledger_error(error) from error
 

@@ -514,6 +514,25 @@ Unique constraint:
 Source records are immutable observations. A corrected parse creates a new
 parser run/source record version; it does not mutate historical evidence.
 
+`discovered_financial_accounts`
+
+- `user_id`, originating mailbox, and stable product fingerprint
+- Institution, account type, masked last four digits, and currency
+- Suggested product/display names that the user can correct
+- State: `pending`, `confirmed`, or `rejected`
+- Optional canonical `financial_account_id` after confirmation
+- First/last detection and decision timestamps
+
+The initial fingerprint is
+`institution:account_type:last_four`. It is derived only from supported,
+deterministically parsed alerts and never from an LLM. A pending discovery is
+a quarantine boundary: linked parser candidates cannot create source records,
+transactions, balances, spending, or insights. Confirmation creates or links
+the canonical financial account and materializes the quarantined candidates
+idempotently. Rejection is durable; later alerts with the same fingerprint are
+marked rejected without entering the ledger. Users may explicitly reconsider a
+rejection.
+
 ### 7.6 Canonical ledger tables
 
 `transactions`
@@ -526,7 +545,9 @@ parser run/source record version; it does not mutate historical evidence.
   `card_payment`, `investment`, `adjustment`, `unknown`
 - Original/redacted narration reference
 - Merchant
-- Category and subcategory
+- Parent category and optional subcategory as separate foreign keys. Tagging
+  choices are ranked deterministically from transaction-text relevance and
+  per-user historical usage; search matches both taxonomy levels.
 - Reconciliation state
 - Categorization source/confidence
 - User review state
@@ -592,6 +613,12 @@ Source provenance and manual correction history remain separate.
 
 A statement period may overlap another imported statement. Duplicate
 statements are linked/reviewed rather than silently discarded.
+
+Institution adapters must scope consolidated documents to the financial
+product being imported before producing normalized rows. For SBI consolidated
+statements, Savings/SB sections are eligible for a savings-account import;
+Demand Loan and Term Loan sections, including DL/TL abbreviations, are excluded
+from transaction extraction and balance metadata.
 
 ### 7.8 Classification and merchant tables
 
@@ -685,13 +712,23 @@ Only one assignment is active per transaction.
 - Provider/model/prompt version
 - Timing, cost metadata, status
 
-`notification_rules`, `notification_deliveries`
+`notifications`, `notification_rules`, `notification_deliveries`
 
 - User rule, event type, channel, local delivery time
 - Deduplication key
+- Optional allow-listed action kind and JSON payload containing only safe
+  internal identifiers
 - Scheduled/sent/failed timestamps and safe provider result
 
 Unique delivery keys prevent a retry from sending the same reminder twice.
+Actionable bank-statement notifications may reference a privately stored PDF
+artifact and a safely inferred savings account. The UI must request the PDF
+password at action time. A notification may contain normalized, non-secret
+guidance derived from the email, such as “Use your Customer ID” or a date format,
+but must never contain an explicit password, customer/account identifier, or
+other credential value. Entered passwords are ephemeral request data and are
+never persisted or logged. Source artifacts are internal evidence and are not
+exposed through a general-purpose document browser.
 
 ### 7.11 Job, outbox, and audit tables
 
@@ -884,13 +921,15 @@ persisting an encrypted refresh token.
 ```text
 GET    /financial-accounts
 POST   /financial-accounts
-GET    /financial-accounts/{account_id}
 PATCH  /financial-accounts/{account_id}
-POST   /financial-accounts/{account_id}/archive
-GET    /financial-accounts/{account_id}/balances
-GET    /credit-cards
-GET    /credit-cards/{account_id}/statements
+DELETE /financial-accounts/{account_id}
 ```
+
+`PATCH` edits user-facing product details while keeping institution and account
+type immutable. `DELETE` is a soft removal: it archives the product, removes it
+from active account/card views, and suppresses future Gmail alerts for a linked
+discovery. Existing source evidence and accepted ledger history remain
+available for audit and historical reporting.
 
 ### 10.5 Import and artifact routes
 
@@ -1104,6 +1143,38 @@ PostgreSQL and never trust a free-form Celery argument for authorization.
 8. Update counters and release the lock.
 
 The initial sync does not claim completeness outside its selected lookback.
+
+### 13.2a Financial-product discovery and approval
+
+1. The user connects Gmail; no financial account is required beforehand.
+2. A bounded background discovery job searches only allowlisted institution
+   domains and persists matching artifacts idempotently. Sender validation
+   requires an exact bank domain or one of its subdomains; substring matches
+   are not trusted.
+3. A deterministic product detector derives institution, bank-account/card
+   type, and ending four digits from explicit transaction body context. It
+   never uses starting digits, customer IDs, or debit-card digits as a
+   bank-account identity. It is intentionally independent of full transaction
+   normalization, so a known product can be offered for confirmation even
+   when that alert layout is not yet supported. A declined card transaction
+   can establish product identity but cannot enter the ledger. The unsupported
+   transaction itself remains quarantined.
+4. Arcis upserts one user-scoped product discovery and links all matching
+   parser candidates to it.
+5. The user confirms suggested details or rejects the product.
+6. Confirmation creates the canonical account and imports its quarantined
+   candidates; future matching alerts materialize automatically.
+7. Rejection keeps both current and future linked candidates out of the
+   canonical ledger until the decision is explicitly reconsidered.
+
+The Gmail scan runs through Celery and durable job state so HTTP requests do
+not remain open while years of provider history are fetched. Product
+fingerprints are global to the Arcis user rather than mailbox-local, preventing
+the same product from being presented twice when alerts are forwarded to
+multiple connected mailboxes.
+
+Privacy-safe template observations and the exact product-identity rules are
+maintained in [EMAIL_FORMATS.md](./EMAIL_FORMATS.md).
 
 ### 13.3 Incremental synchronization
 
@@ -2009,4 +2080,3 @@ Production deployment additionally requires:
 - Safe observability verification
 - Export, disconnect, and deletion tests
 - Documented cost and availability choices
-

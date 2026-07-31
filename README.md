@@ -16,6 +16,8 @@ authentication and multi-user support.
 ## What Arcis does today
 
 - Connect multiple Gmail accounts through OAuth.
+- Scan connected Gmail accounts to detect supported bank accounts and credit
+  cards, review the suggested details, and choose which products to add.
 - Synchronize bank and credit-card transaction alerts daily or on demand.
 - Import PDF, CSV, and XLSX statements.
 - Reconcile email transactions with monthly statements.
@@ -30,8 +32,9 @@ authentication and multi-user support.
   potential anomalies.
 - Generate evidence-linked monthly spending summaries, forecasts, anomalies,
   budgets, recurring commitments, and category trends.
-- Manage statement files through a private document vault with configurable
-  retention and a 30-day recovery window after deletion.
+- Keep source emails and statement files private behind configurable retention
+  controls and a 30-day recovery window; they are not exposed as a document
+  browser.
 
 Natural-language finance questions, additional institution adapters,
 investment tracking, and production multi-user authentication remain roadmap
@@ -49,6 +52,11 @@ merchant-wise spending, and comparisons with previous months.
 View transactions from HDFC, ICICI, SBI, DBS, Axis, Union Bank, and supported
 credit cards in one ledger without treating separate cards from the same bank
 as the same account.
+
+The normal onboarding path is Gmail-first: connect a mailbox, select
+**Scan accounts & cards**, then confirm each detected product. Transactions
+remain quarantined until confirmation. Ignored products stay hidden and future
+matching alerts are skipped; they can be reopened later from reviewed products.
 
 ### Reconcile a monthly statement
 

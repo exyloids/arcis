@@ -28,6 +28,9 @@ starting work. Complete tasks in order and record evidence in `STATUS.md`.
 - [x] **GMAIL-003** Implement the initial ICICI transaction-alert adapter using sanitized fixtures and a parser-review queue for unsupported messages.
 - [x] **GMAIL-004** Implement the initial HDFC transaction-alert adapter, parser metrics, and safe failure reporting.
 - [x] **GMAIL-005** Add scheduled mailbox synchronization and user-visible run history after on-demand synchronization is reliable.
+- [x] **GMAIL-006** Discover bank accounts and credit cards from Gmail alerts,
+  require product-level confirmation before ledger materialization, and
+  persist rejected-product decisions so future matching alerts are skipped.
 
 ## Phase 3 — Statements and reconciliation
 
@@ -41,6 +44,11 @@ starting work. Complete tasks in order and record evidence in `STATUS.md`.
 
 - [x] **INTELLIGENCE-001** Define merchant normalization rules and a correction-backed merchant vocabulary.
 - [x] **INTELLIGENCE-002** Add deterministic category rules, confidence scores, and correction-backed user overrides.
+- [x] **INTELLIGENCE-005** Ask before propagating a manual category to existing
+  uncategorized transactions from the same normalized vendor, while retaining
+  the vendor override for future detections.
+- [x] **INTELLIGENCE-006** Persist parent categories and subcategories
+  independently, with searchable and usage-ranked transaction tagging.
 - [x] **INTELLIGENCE-003** Implement recurring-payment and subscription detection from canonical transactions.
 - [x] **INTELLIGENCE-004** Add evidence-linked anomaly detection and monthly spending forecasts.
 
@@ -65,8 +73,16 @@ starting work. Complete tasks in order and record evidence in `STATUS.md`.
   date, and monthly/annual commitment views.
 - [x] **REMINDERS-001** Track credit-card statement amount, minimum due, due
   date, and payment status, with idempotent upcoming and overdue reminders.
-- [x] **DOCUMENTS-001** Add a document-vault view for uploaded and
-  Gmail-detected statements, with safe storage, parser/review status, and
+- [x] **ACCOUNTS-001** Let users edit confirmed account/card details and
+  archive products safely while retaining history and suppressing future
+  Gmail alerts for removed discoveries.
+- [x] **BALANCES-001** Base savings balances on the latest confirmed statement
+  closing balance plus newer activity; mark accounts without a baseline as
+  unavailable and provide a notification-led Gmail-statement password workflow.
+- [x] **NOTIFICATIONS-001** Add an in-app notification center for Gmail scan
+  completion, statement password confirmation, and payment reminders.
+- [x] **SOURCE-RETENTION-001** Keep uploaded and Gmail-detected source files
+  internal, with safe storage, parser/review status, and
   source metadata without exposing sensitive raw content.
 - [ ] **PRIVACY-001** Implement verified user export, mailbox/account/source
   deletion, retention controls, and an exercised restoration workflow.

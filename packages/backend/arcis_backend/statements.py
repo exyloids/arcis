@@ -11,6 +11,8 @@ import tempfile
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from decimal import Decimal, InvalidOperation
+from email import policy
+from email.parser import BytesParser
 from uuid import UUID, uuid4
 
 import fitz
@@ -20,7 +22,7 @@ from sqlalchemy.orm import Session
 from arcis_backend.ledger import LedgerError
 from arcis_backend.storage import MinioArtifactStorage
 
-PARSER_VERSION = "2026-07-28"
+PARSER_VERSION = "2026-07-31"
 
 
 @dataclass(frozen=True)
@@ -89,9 +91,49 @@ class StatementService:
 
     def gmail_attachments(self) -> list[dict[str, object]]:
         with Session(self.engine) as session:
-            return [dict(row) for row in session.execute(text("""SELECT id, mailbox_id, provider_message_id,
-                byte_size, created_at FROM source_artifacts WHERE user_id = :user_id AND kind = 'gmail_attachment'
-                AND lifecycle_state = 'active' ORDER BY created_at DESC"""), {"user_id": self.user_id}).mappings()]
+            rows = session.execute(
+                text(
+                    """SELECT attachment.id, attachment.mailbox_id, attachment.provider_message_id,
+                              attachment.byte_size, attachment.created_at, mailbox.display_email,
+                              message.object_key AS message_object_key
+                       FROM source_artifacts attachment
+                       LEFT JOIN mailboxes mailbox ON mailbox.id = attachment.mailbox_id
+                       LEFT JOIN source_artifacts message
+                         ON message.user_id = attachment.user_id
+                        AND message.mailbox_id = attachment.mailbox_id
+                        AND message.kind = 'gmail_message'
+                        AND message.provider_message_id =
+                            split_part(attachment.provider_message_id, ':attachment:', 1)
+                       WHERE attachment.user_id = :user_id
+                         AND attachment.kind = 'gmail_attachment'
+                         AND attachment.lifecycle_state = 'active'
+                       ORDER BY attachment.created_at DESC LIMIT 20"""
+                ),
+                {"user_id": self.user_id},
+            ).mappings()
+            attachments = []
+            for row in rows:
+                item = dict(row)
+                item.update(self._gmail_attachment_labels(item))
+                item.pop("message_object_key", None)
+                attachments.append(item)
+            return attachments
+
+    def _gmail_attachment_labels(self, attachment: dict[str, object]) -> dict[str, str]:
+        labels = {"subject": "Monthly statement", "filename": "Statement.pdf"}
+        object_key = attachment.get("message_object_key")
+        provider_message_id = str(attachment.get("provider_message_id") or "")
+        if not object_key:
+            return labels
+        try:
+            message = BytesParser(policy=policy.default).parsebytes(self.storage.get_bytes(str(object_key)))
+            labels["subject"] = str(message.get("Subject") or labels["subject"])
+            ordinal = int(provider_message_id.rsplit(":attachment:", 1)[1])
+            part = list(message.iter_attachments())[ordinal - 1]
+            labels["filename"] = part.get_filename() or labels["filename"]
+        except (IndexError, TypeError, ValueError):
+            pass
+        return labels
 
     def stage_gmail_attachment(self, artifact_id: UUID, account_id: UUID, password: str | None) -> dict[str, object]:
         with Session(self.engine) as session:
@@ -280,15 +322,77 @@ def parse_pdf_statement_in_process(filename: str, content: bytes, password: str 
     lowered = f"{filename}\n{document_text}".lower()
     filename_lower = filename.lower().replace("-", " ").replace("_", " ")
     is_credit_card = any(marker in filename_lower for marker in ("credit card", "amazon pay", "card statement"))
-    parser = "icici_credit_card_pdf" if is_credit_card and "icici" in lowered else "icici_bank_pdf" if "icici" in lowered else "hdfc_bank_pdf" if "hdfc" in lowered else "generic_pdf"
-    rows = _parse_rows(document_text, is_credit_card=is_credit_card)
-    for positioned_row in _parse_rows(positioned_text, is_credit_card=is_credit_card):
+    is_sbi = bool(re.search(r"\b(?:state bank of india|sbi)\b", lowered))
+    parser = "icici_credit_card_pdf" if is_credit_card and "icici" in lowered else "icici_bank_pdf" if "icici" in lowered else "hdfc_bank_pdf" if "hdfc" in lowered else "sbi_bank_pdf" if is_sbi else "generic_pdf"
+    parse_text = _sbi_savings_section(document_text) if is_sbi else document_text
+    positioned_parse_text = _sbi_savings_section(positioned_text) if is_sbi else positioned_text
+    rows = _parse_rows(parse_text, is_credit_card=is_credit_card)
+    for positioned_row in _parse_rows(positioned_parse_text, is_credit_card=is_credit_card):
         key = (positioned_row["transaction_date"], positioned_row["narration"], positioned_row["amount"], positioned_row["direction"])
         if not any((row["transaction_date"], row["narration"], row["amount"], row["direction"]) == key for row in rows):
             rows.append(positioned_row)
     if not rows:
         raise LedgerError("Supported PDF statement format was detected but no transaction rows could be extracted")
-    return ParsedStatement(parser, _metadata(document_text), tuple(rows))
+    metadata = _metadata(parse_text)
+    if not is_credit_card:
+        if metadata["period_start"] is None:
+            metadata["period_start"] = min(row["transaction_date"] for row in rows)
+        if metadata["period_end"] is None:
+            metadata["period_end"] = max(row["transaction_date"] for row in rows)
+        if metadata["closing_balance"] is None:
+            metadata["closing_balance"] = _last_running_balance(rows)
+    return ParsedStatement(parser, metadata, tuple(rows))
+
+
+def _sbi_savings_section(value: str) -> str:
+    """Exclude loan-account sections from an SBI consolidated statement.
+
+    SBI statements can contain an SB account followed by Demand Loan (DL) or
+    Term Loan (TL) accounts. Account-type headings are treated as hard section
+    boundaries. Unknown/global header lines remain available for statement
+    metadata, but rows after a loan heading remain excluded until a savings
+    heading is encountered.
+    """
+    lines = value.splitlines()
+    classifications = [_sbi_account_section(line) for line in lines]
+    if False not in classifications:
+        return value
+    selected: list[str] = []
+    include_section: bool | None = None
+    for line, classification in zip(lines, classifications, strict=True):
+        if classification is not None:
+            include_section = classification
+        if include_section is not False:
+            selected.append(line)
+    return "\n".join(selected)
+
+
+def _sbi_account_section(line: str) -> bool | None:
+    """Return True for savings, False for DL/TL loan, and None otherwise."""
+    compact = " ".join(line.split())
+    heading = bool(
+        re.search(
+            r"\b(?:account|a/c)\s*(?:type|category|product)\b"
+            r"|\b(?:type|category|product)\s+of\s+(?:account|a/c)\b",
+            compact,
+            re.I,
+        )
+    )
+    explicit_section = bool(
+        re.search(
+            r"^\s*(?:savings?|sb(?:chq)?|demand\s+loan|term\s+loan|DL|TL)"
+            r"\s+(?:bank\s+)?(?:account|a/c)\b",
+            compact,
+            re.I,
+        )
+    )
+    if not heading and not explicit_section:
+        return None
+    if re.search(r"\b(?:demand\s+loan|term\s+loan|loan|DL|TL)\b", compact, re.I):
+        return False
+    if re.search(r"\b(?:savings?|SB(?:CHQ)?)\b", compact, re.I):
+        return True
+    return None
 
 
 def _parse_rows(value: str, *, is_credit_card: bool) -> list[dict[str, object]]:
@@ -384,14 +488,43 @@ def _reference(body: str) -> str | None:
 
 
 def _metadata(value: str) -> dict[str, object]:
-    return {"period_start": _find_date(value, r"(?:statement\s+period|period)\D{0,20}(\d{1,2}[/-][A-Za-z]{3}[/-]\d{2,4}|\d{2}[/-]\d{2}[/-]\d{4})"),
-            "period_end": None, "opening_balance": _find_money(value, r"opening\s+balance\D{0,20}([\d,]+\.\d{2})"),
+    period_range = re.search(
+        r"(?:statement\s+period|period)\D{0,20}"
+        r"(?P<start>\d{1,2}[/-][A-Za-z]{3}[/-]\d{2,4}|\d{1,2}[/-]\d{1,2}[/-]\d{2,4})"
+        r"\D{1,20}(?P<end>\d{1,2}[/-][A-Za-z]{3}[/-]\d{2,4}|\d{1,2}[/-]\d{1,2}[/-]\d{2,4})",
+        value,
+        re.I,
+    )
+    period_start = _date(period_range["start"]) if period_range else _find_date(
+        value,
+        r"(?:statement\s+period|period)\D{0,20}"
+        r"(\d{1,2}[/-][A-Za-z]{3}[/-]\d{2,4}|\d{1,2}[/-]\d{1,2}[/-]\d{2,4})",
+    )
+    period_end = _date(period_range["end"]) if period_range else _find_date(
+        value,
+        r"(?:statement\s+date|as\s+on|ending\s+on)\D{0,20}"
+        r"(\d{1,2}[/-][A-Za-z]{3}[/-]\d{2,4}|\d{1,2}[/-]\d{1,2}[/-]\d{2,4})",
+    )
+    return {"period_start": period_start,
+            "period_end": period_end, "opening_balance": _find_money(value, r"opening\s+balance\D{0,20}([\d,]+\.\d{2})"),
             "closing_balance": _find_money(value, r"closing\s+balance\D{0,20}([\d,]+\.\d{2})"),
             "statement_amount": _find_money(value, r"(?:total\s+amount\s+due|statement\s+amount)\D{0,20}([\d,]+\.\d{2})"),
             "minimum_due": _find_money(value, r"minimum\s+(?:amount\s+)?due\D{0,20}([\d,]+\.\d{2})"),
             "due_date": _find_date(value, r"payment\s+due\s+date\D{0,20}(\d{1,2}[/-][A-Za-z]{3}[/-]\d{2,4}|\d{2}[/-]\d{2}[/-]\d{4})"),
             "total_limit": _find_money(value, r"total\s+credit\s+limit\D{0,20}([\d,]+\.\d{2})"),
             "available_limit": _find_money(value, r"available\s+credit\s+limit\D{0,20}([\d,]+\.\d{2})")}
+
+
+def _last_running_balance(rows: list[dict[str, object]]) -> Decimal | None:
+    """Read the final balance column without treating it as a transaction amount."""
+    money_pattern = re.compile(r"(?<![\d/.-])(?:₹|rs\.?\s*)?([\d,]+\.\d{2})(?![\d.])", re.I)
+    for row in sorted(rows, key=lambda item: item["transaction_date"], reverse=True):
+        raw_columns = row.get("raw_columns")
+        line = raw_columns.get("line") if isinstance(raw_columns, dict) else None
+        amounts = money_pattern.findall(str(line or ""))
+        if len(amounts) >= 2:
+            return _money(amounts[-1])
+    return None
 
 
 def _match_transactions(session: Session, user_id: UUID, account_id: UUID, row: object) -> list[dict[str, object]]:

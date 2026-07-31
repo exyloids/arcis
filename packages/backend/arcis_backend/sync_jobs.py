@@ -16,6 +16,12 @@ from arcis_backend.mailboxes import MailboxError, MailboxService
 
 logger = logging.getLogger(__name__)
 
+ACCOUNT_DISCOVERY_QUERY = (
+    "{from:(hdfcbank.bank.in) from:(hdfcbank.net) from:(hdfcbank.com) "
+    "from:(icicibank.com) from:(icici.bank.in) from:(yes.bank.in) "
+    "from:(sbi.bank.in) from:(dcbbank.com) from:(getonecard.app)} newer_than:5y"
+)
+
 
 class SyncJobError(ValueError):
     """A safe error for synchronization job commands."""
@@ -27,6 +33,25 @@ class GmailSyncJobService:
         self.user_id = user_id
 
     def request_sync(self, mailbox_id: UUID) -> dict[str, object]:
+        return self._request_mailbox_job(
+            mailbox_id,
+            str(mailbox_id),
+            {"mailbox_id": str(mailbox_id), "mode": "incremental"},
+        )
+
+    def request_discovery(self, mailbox_id: UUID) -> dict[str, object]:
+        return self._request_mailbox_job(
+            mailbox_id,
+            f"discovery:{mailbox_id}",
+            {"mailbox_id": str(mailbox_id), "mode": "discovery"},
+        )
+
+    def _request_mailbox_job(
+        self,
+        mailbox_id: UUID,
+        idempotency_key: str,
+        progress: dict[str, object],
+    ) -> dict[str, object]:
         with Session(self.engine) as session, session.begin():
             mailbox = session.execute(
                 text("""SELECT id FROM mailboxes WHERE id = :mailbox_id AND user_id = :user_id
@@ -39,7 +64,7 @@ class GmailSyncJobService:
                 text("""SELECT id, state, job_kind, phase, progress, error_code, attempt, created_at, updated_at
                 FROM jobs WHERE user_id = :user_id AND job_kind = 'gmail_sync'
                 AND idempotency_key = :key AND state IN ('queued', 'running') FOR UPDATE"""),
-                {"user_id": self.user_id, "key": str(mailbox_id)},
+                {"user_id": self.user_id, "key": idempotency_key},
             ).mappings().one_or_none()
             if existing is not None:
                 return dict(existing)
@@ -50,7 +75,12 @@ class GmailSyncJobService:
                 ON CONFLICT (user_id, job_kind, idempotency_key) DO UPDATE SET state = 'queued',
                 phase = 'queued', progress = EXCLUDED.progress, error_code = NULL,
                 updated_at = now() RETURNING id"""),
-                {"id": job_id, "user_id": self.user_id, "key": str(mailbox_id), "progress": json.dumps({"mailbox_id": str(mailbox_id)})},
+                {
+                    "id": job_id,
+                    "user_id": self.user_id,
+                    "key": idempotency_key,
+                    "progress": json.dumps(progress),
+                },
             ).scalar_one()
         return self.get_job(job_id)
 
@@ -110,7 +140,27 @@ class GmailSyncJobService:
         return self.get_job(row)
 
     def finish(self, job_id: UUID, progress: dict[str, object]) -> dict[str, object]:
-        return self._transition(job_id, "completed", "completed", progress, None)
+        completed = self._transition(job_id, "completed", "completed", progress, None)
+        with Session(self.engine) as session, session.begin():
+            scanned = int(progress.get("scanned", 0))
+            added = int(progress.get("added", 0))
+            session.execute(
+                text(
+                    """INSERT INTO notifications
+                       (id, user_id, notification_kind, deduplication_key, title, body)
+                       VALUES (:id, :user_id, 'gmail_scan_completed', :key,
+                               'Gmail scan complete', :body)
+                       ON CONFLICT (user_id, notification_kind, deduplication_key)
+                       DO NOTHING"""
+                ),
+                {
+                    "id": uuid4(),
+                    "user_id": self.user_id,
+                    "key": str(job_id),
+                    "body": f"{scanned} email(s) scanned and {added} new source email(s) added.",
+                },
+            )
+        return completed
 
     def fail(self, job_id: UUID, error_code: str) -> dict[str, object]:
         return self._transition(job_id, "failed", "failed", {}, error_code)
@@ -135,6 +185,36 @@ class GmailSyncJobService:
             return None
         try:
             mailbox_id = UUID(str(job["progress"]["mailbox_id"]))
+            if job["progress"].get("mode") == "discovery":
+                before = {
+                    str(item["id"])
+                    for item in candidates.list_discovered_accounts()
+                    if item["mailbox_id"] == mailbox_id
+                }
+                result = self.backfill(
+                    mailbox_id,
+                    ACCOUNT_DISCOVERY_QUERY,
+                    mailboxes,
+                    oauth,
+                    artifacts,
+                    candidates,
+                    max_results=2000,
+                )
+                after = {
+                    str(item["id"])
+                    for item in candidates.list_discovered_accounts()
+                    if item["mailbox_id"] == mailbox_id
+                }
+                return self.finish(
+                    job["id"],
+                    {
+                        "mailbox_id": str(mailbox_id),
+                        "mode": "discovery",
+                        **result,
+                        "products_detected": len(after),
+                        "new_products": len(after - before),
+                    },
+                )
             mailbox = next(item for item in mailboxes.list_mailboxes() if item["id"] == mailbox_id)
             access_token = oauth.refresh_access_token(mailboxes.active_refresh_token(mailbox_id))
             cursor = mailbox.get("history_cursor")

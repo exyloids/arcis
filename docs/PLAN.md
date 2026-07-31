@@ -858,6 +858,11 @@ Work:
 - Connect multiple Gmail accounts through OAuth.
 - Maintain independent mailbox cursors.
 - Discover and persist relevant emails idempotently.
+- Detect bank accounts and credit cards from supported alerts before requiring
+  manual account setup. Keep their transactions outside the ledger until the
+  user confirms the product and completes any missing name/currency details.
+- Persist declined product fingerprints and skip their current and future
+  alerts unless the user explicitly reopens the decision.
 - Implement first ICICI and HDFC email parsers.
 - Add **Sync Now** and scheduled daily sync.
 - Show progress, counters, health, and actionable errors.
@@ -867,6 +872,8 @@ Work:
 Completion criteria:
 
 - Supported new transactions appear automatically.
+- Unconfirmed or declined products never affect transactions, spending,
+  balances, reports, budgets, or insights.
 - Repeated and concurrent sync requests do not duplicate data.
 - Interrupted syncs recover without skipping recorded messages.
 - Parser performance is measurable by template and version.
@@ -929,8 +936,8 @@ Work:
   and annual commitment totals.
 - Upcoming recurring-expense timeline.
 - In-app and email notifications.
-- Document vault showing uploaded and Gmail-detected source files, source and
-  parser state, safe review status, and links only to authorized metadata.
+- Internal retention of uploaded and Gmail-detected source files, source and
+  parser state, and safe review status without a general document-browser UI.
 - Responsive UI and accessibility: keyboard-safe dialogs, visible focus,
   readable body text, mobile touch targets, and verified desktop/tablet/mobile
   layouts.

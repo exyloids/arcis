@@ -28,37 +28,36 @@ from sqlalchemy.orm import Session
 
 from arcis_backend.storage import MinioArtifactStorage
 
-DEFAULT_CATEGORIES = (
-    ("food_dining", "Food and Dining"),
-    ("groceries", "Groceries"),
-    ("shopping", "Shopping"),
-    ("bills_utilities", "Bills and Utilities"),
-    ("travel", "Travel"),
-    ("transportation", "Transportation"),
-    ("salary_income", "Salary and Income"),
-    ("transfers", "Transfers"),
-    ("cash_withdrawal", "Cash Withdrawal"),
-    ("fees_charges", "Fees and Charges"),
-    ("other", "Other"),
-)
-
 CATEGORY_TAXONOMY = {
     "transport": ("Transport", "Uber, Rapido, Auto, Cab, Train, Metro, Bus, Bike, Fuel, EV Recharge, Flights, Parking, FastTag, Tolls, Lounge, Fine"),
     "food_drinks": ("Food & Drinks", "Eating Out, Take Away, Tea & Coffee, Fast Food, Snacks, Swiggy, Zomato, Sweets, Liquor, Beverages, Date, Pizza, Tiffin"),
     "shopping": ("Shopping", "Clothes, Footwear, Electronics, Festival, Video Games, Books, Plants, Jewellery, Furniture, Appliances, Utensils, Vehicle, Cosmetics, Toys, Stationery"),
-    "groceries": ("Groceries", "Supermarket, Fruits & Vegetables, Dairy, Meat & Seafood, Household Supplies"),
-    "home": ("Home", "Rent, Maintenance, Repairs, Furnishing, Domestic Help"),
-    "entertainment": ("Entertainment", "Movies, Streaming, Games, Music, Hobbies"),
-    "events": ("Events", "Tickets, Celebrations, Gifts, Conferences"),
-    "travel": ("Travel", "Hotels, Bookings, Visa, Foreign Exchange"),
-    "medical": ("Medical", "Doctor, Pharmacy, Tests, Hospital, Insurance"),
-    "personal": ("Personal", "Salon, Clothing Care, Mobile, Miscellaneous"),
-    "fitness": ("Fitness", "Gym, Sports, Wellness"),
-    "services": ("Services", "Professional, Repairs, Delivery, Government"),
-    "bills": ("Bills", "Electricity, Water, Internet, Mobile, Gas"),
-    "subscriptions": ("Subscriptions", "Software, Streaming, Memberships"),
-    "emi": ("EMI", "Home Loan, Vehicle Loan, Personal Loan"),
-    "credit_bill": ("Credit Bill", "Credit Card Bill Payment"),
+    "groceries": ("Groceries", "Staples, Vegetables, Fruits, Meat, Eggs, Bakery, Dairy, Zepto"),
+    "home": ("Home", "Essentials, Toiletries, Decor, Cleaning, Painting, Renovation, Pest Control, Construction"),
+    "entertainment": ("Entertainment", "Movies, Shows, Bowling, Games"),
+    "events": ("Events", "Party, Spiritual, Wedding"),
+    "travel": ("Travel", "Activities, Camping, Hotel, Commute, Meals, Visa, Hostel, Airbnb"),
+    "medical": ("Medical", "Medicines, Hospital, Clinic, Dentist, Lab Test, Hygiene"),
+    "personal": ("Personal", "Self Care, Grooming, Hobbies, Therapy"),
+    "fitness": ("Fitness", "Gym, Badminton, Football, Cricket, Classes, Equipment, Nutrition"),
+    "services": ("Services", "Laundry, Tailor, Courier, Carpenter, Plumber, Mechanic, Photographer, Driver, Vehicle Wash, Electrician, Painting, Print, Xerox, Legal, Repair, Logistics"),
+    "bill": ("Bill", "Phone, Rent, Water, Electricity, Gas, Internet, Education, DTH, Cook, Maintenance"),
+    "subscription": ("Subscription", "Netflix, Prime, YouTube, Spotify, Google, Apple, Learning, Bumble, JioHotstar, Google Play, Xbox, PlayStation, ChatGPT, Software"),
+    "emi": ("EMI", "Electronics, House, Vehicle, Education"),
+    "credit_bill": ("Credit Bill", "Credit Card, Amazon Pay"),
+    "investment": ("Investment", "Mutual Funds, Stocks, PPF, NPS, Fixed Deposit, Crypto, Gold"),
+    "support": ("Support", "Parents, Spouse, Mom, Dad, Pocket Money"),
+    "insurance": ("Insurance", "Health, Vehicle, Life, Electronics"),
+    "tax": ("Tax", "Income Tax, GST, Property Tax"),
+    "misc": ("Misc.", "Tip, Verification, Forex, Deposit, Gift Card"),
+    "self_transfer": ("Self-Transfer", ""),
+    "savings": ("Savings", ""),
+    "gift": ("Gift", ""),
+    "lent": ("Lent", ""),
+    "donation": ("Donation", ""),
+    "hidden_charges": ("Hidden Charges", ""),
+    "cash_withdrawal": ("Cash Withdrawal", ""),
+    "return": ("Return", ""),
 }
 
 BUILTIN_MERCHANT_MAPPINGS = (
@@ -71,6 +70,7 @@ BUILTIN_MERCHANT_MAPPINGS = (
     ("hpcl", "HP Fuel", "transport_fuel"),
     ("bpcl", "BP Fuel", "transport_fuel"),
     ("amazon", "Amazon", "shopping_electronics"),
+    ("netflix", "Netflix", "subscription_netflix"),
 )
 
 REPORTING_PERIODS = {
@@ -109,48 +109,60 @@ class LedgerService:
                 ),
                 {"id": self.user_id, "email": f"local-{self.user_id}@arcis.invalid"},
             )
-            for code, name in DEFAULT_CATEGORIES:
-                session.execute(
-                    text(
-                        """
-                        INSERT INTO categories (id, user_id, code, name, is_system)
-                        VALUES (:id, :user_id, :code, :name, true)
-                        ON CONFLICT (user_id, code) DO NOTHING
-                        """
-                    ),
-                    {"id": uuid4(), "user_id": self.user_id, "code": code, "name": name},
-                )
+            active_codes: set[str] = set()
             for code, (name, children) in CATEGORY_TAXONOMY.items():
+                active_codes.add(code)
                 parent_id = uuid4()
                 session.execute(text("""INSERT INTO categories (id, user_id, code, name, is_system)
-                    VALUES (:id, :user_id, :code, :name, true) ON CONFLICT (user_id, code) DO NOTHING"""),
+                    VALUES (:id, :user_id, :code, :name, true) ON CONFLICT (user_id, code) DO UPDATE
+                    SET name = EXCLUDED.name, parent_id = NULL, archived_at = NULL, is_system = true,
+                        updated_at = now()"""),
                     {"id": parent_id, "user_id": self.user_id, "code": code, "name": name})
                 parent_id = session.execute(text("SELECT id FROM categories WHERE user_id = :user_id AND code = :code"), {"user_id": self.user_id, "code": code}).scalar_one()
-                for child in children.split(", "):
+                for child in filter(None, children.split(", ")):
                     child_code = f"{code}_{child.lower().replace(' & ', '_').replace(' ', '_')}"
+                    active_codes.add(child_code)
                     session.execute(text("""INSERT INTO categories (id, user_id, code, name, parent_id, is_system)
-                        VALUES (:id, :user_id, :code, :name, :parent_id, true) ON CONFLICT (user_id, code) DO NOTHING"""),
+                        VALUES (:id, :user_id, :code, :name, :parent_id, true)
+                        ON CONFLICT (user_id, code) DO UPDATE
+                        SET name = EXCLUDED.name, parent_id = EXCLUDED.parent_id,
+                            archived_at = NULL, is_system = true, updated_at = now()"""),
                         {"id": uuid4(), "user_id": self.user_id, "code": child_code, "name": child, "parent_id": parent_id})
+            session.execute(
+                text(
+                    """UPDATE categories SET archived_at = now(), updated_at = now()
+                       WHERE user_id = :user_id AND is_system = true
+                         AND NOT (code = ANY(:active_codes)) AND archived_at IS NULL"""
+                ),
+                {"user_id": self.user_id, "active_codes": list(active_codes)},
+            )
             self._seed_builtin_merchant_rules(session)
 
     def _seed_builtin_merchant_rules(self, session: Session) -> None:
         """Register application-maintained keyword rules once per user."""
         for pattern, merchant, category_code in BUILTIN_MERCHANT_MAPPINGS:
-            category_id = session.execute(
-                text("SELECT id FROM categories WHERE user_id = :user_id AND code = :code"),
+            category = session.execute(
+                text("SELECT id, parent_id FROM categories WHERE user_id = :user_id AND code = :code"),
                 {"user_id": self.user_id, "code": category_code},
-            ).scalar_one_or_none()
-            if category_id is None:
+            ).mappings().one_or_none()
+            if category is None:
                 continue
+            category_id = category["parent_id"] or category["id"]
+            subcategory_id = category["id"] if category["parent_id"] else None
             session.execute(
                 text(
                     """INSERT INTO merchant_rules (id, user_id, match_pattern, merchant_normalized,
-                        category_id, priority, rule_type, confidence)
-                    VALUES (:id, :user_id, :pattern, :merchant, :category_id, 100, 'keyword', 0.9500)
-                    ON CONFLICT (user_id, match_pattern) DO NOTHING"""
+                        category_id, subcategory_id, priority, rule_type, confidence)
+                    VALUES (:id, :user_id, :pattern, :merchant, :category_id, :subcategory_id,
+                            100, 'keyword', 0.9500)
+                    ON CONFLICT (user_id, match_pattern) DO UPDATE
+                    SET merchant_normalized = EXCLUDED.merchant_normalized,
+                        category_id = EXCLUDED.category_id,
+                        subcategory_id = EXCLUDED.subcategory_id,
+                        updated_at = now()"""
                 ),
                 {"id": uuid4(), "user_id": self.user_id, "pattern": pattern, "merchant": merchant,
-                 "category_id": category_id},
+                 "category_id": category_id, "subcategory_id": subcategory_id},
             )
 
     def list_accounts(self) -> list[dict[str, object]]:
@@ -191,11 +203,100 @@ class LedgerService:
             )
         return self._one("SELECT * FROM financial_accounts WHERE id = :id", {"id": account_id})
 
+    def update_account(
+        self,
+        account_id: UUID,
+        payload: dict[str, object],
+    ) -> dict[str, object]:
+        display_name = _required_text(payload, "display_name")
+        product_name = _required_text(payload, "product_name")
+        masked_identifier = _optional_text(payload, "masked_identifier")
+        currency = (_optional_text(payload, "currency") or "INR").upper()
+        if not re.fullmatch(r"[A-Z]{3}", currency):
+            raise LedgerError("Currency must be a three-letter ISO code")
+        with Session(self.engine) as session, session.begin():
+            result = session.execute(
+                text(
+                    """UPDATE financial_accounts
+                       SET display_name = :display_name,
+                           product_name = :product_name,
+                           masked_identifier = :masked_identifier,
+                           currency = :currency,
+                           version = version + 1,
+                           updated_at = now()
+                       WHERE id = :id AND user_id = :user_id AND status = 'active'"""
+                ),
+                {
+                    "id": account_id,
+                    "user_id": self.user_id,
+                    "display_name": display_name,
+                    "product_name": product_name,
+                    "masked_identifier": masked_identifier,
+                    "currency": currency,
+                },
+            )
+            if result.rowcount != 1:
+                raise LedgerError("Active account or card was not found")
+            session.execute(
+                text(
+                    """UPDATE discovered_financial_accounts
+                       SET suggested_product_name = :product_name,
+                           suggested_display_name = :display_name,
+                           currency = :currency,
+                           updated_at = now()
+                       WHERE user_id = :user_id AND financial_account_id = :id"""
+                ),
+                {
+                    "id": account_id,
+                    "user_id": self.user_id,
+                    "product_name": product_name,
+                    "display_name": display_name,
+                    "currency": currency,
+                },
+            )
+        return self._one(
+            "SELECT * FROM financial_accounts WHERE id = :id AND user_id = :user_id",
+            {"id": account_id, "user_id": self.user_id},
+        )
+
+    def archive_account(self, account_id: UUID) -> None:
+        """Remove a product from active use without deleting financial history."""
+        with Session(self.engine) as session, session.begin():
+            result = session.execute(
+                text(
+                    """UPDATE financial_accounts
+                       SET status = 'archived', version = version + 1, updated_at = now()
+                       WHERE id = :id AND user_id = :user_id AND status = 'active'"""
+                ),
+                {"id": account_id, "user_id": self.user_id},
+            )
+            if result.rowcount != 1:
+                raise LedgerError("Active account or card was not found")
+            # A Gmail-discovered product must stay suppressed after removal.
+            # Existing accepted candidates and ledger rows remain as audit history.
+            session.execute(
+                text(
+                    """UPDATE discovered_financial_accounts
+                       SET state = 'rejected', financial_account_id = NULL,
+                           decided_at = now(), updated_at = now()
+                       WHERE user_id = :user_id AND financial_account_id = :id"""
+                ),
+                {"id": account_id, "user_id": self.user_id},
+            )
+
     def list_categories(self) -> list[dict[str, object]]:
         return self._rows(
-            """SELECT c.id, c.code, c.name, c.parent_id, p.name AS parent_name, c.is_system, c.version
+            """SELECT c.id, c.code, c.name, c.parent_id, p.name AS parent_name,
+                      c.is_system, c.version,
+                      CASE WHEN c.parent_id IS NULL
+                           THEN COUNT(t.id) FILTER (WHERE t.category_id = c.id)
+                           ELSE COUNT(t.id) FILTER (WHERE t.subcategory_id = c.id)
+                      END AS usage_count
             FROM categories c LEFT JOIN categories p ON p.id = c.parent_id
+            LEFT JOIN transactions t ON t.user_id = c.user_id
+                AND (t.category_id = c.id OR t.subcategory_id = c.id)
             WHERE c.user_id = :user_id AND c.archived_at IS NULL
+            GROUP BY c.id, p.name
             ORDER BY COALESCE(p.name, c.name), c.parent_id NULLS FIRST, c.name"""
         )
 
@@ -217,17 +318,21 @@ class LedgerService:
 
     def list_merchant_rules(self) -> list[dict[str, object]]:
         return self._rows("""SELECT mr.id, mr.match_pattern, mr.merchant_normalized, mr.priority,
-            mr.category_id, c.name AS category FROM merchant_rules mr LEFT JOIN categories c ON c.id = mr.category_id
+            mr.category_id, c.name AS category, mr.subcategory_id, subcategory.name AS subcategory
+            FROM merchant_rules mr LEFT JOIN categories c ON c.id = mr.category_id
+            LEFT JOIN categories subcategory ON subcategory.id = mr.subcategory_id
             WHERE mr.user_id = :user_id ORDER BY mr.priority, mr.created_at""")
 
     def create_merchant_rule(self, payload: dict[str, object]) -> dict[str, object]:
         rule_id = uuid4()
         category_id = UUID(str(payload["category_id"])) if payload.get("category_id") else None
         with Session(self.engine) as session, session.begin():
-            session.execute(text("""INSERT INTO merchant_rules (id, user_id, match_pattern, merchant_normalized, category_id, priority)
-                VALUES (:id, :user_id, :pattern, :merchant, :category_id, :priority)"""),
+            session.execute(text("""INSERT INTO merchant_rules (id, user_id, match_pattern, merchant_normalized,
+                category_id, subcategory_id, priority)
+                VALUES (:id, :user_id, :pattern, :merchant, :category_id, :subcategory_id, :priority)"""),
                 {"id": rule_id, "user_id": self.user_id, "pattern": _required_text(payload, "match_pattern").upper(),
                  "merchant": _required_text(payload, "merchant_normalized"), "category_id": category_id,
+                 "subcategory_id": UUID(str(payload["subcategory_id"])) if payload.get("subcategory_id") else None,
                  "priority": int(payload.get("priority", 100))})
         return self._one("SELECT * FROM merchant_rules WHERE id = :id", {"id": rule_id})
 
@@ -262,9 +367,13 @@ class LedgerService:
                     )
                     if not matched:
                         continue
-                    session.execute(text("""UPDATE transactions SET merchant_normalized = :merchant, category_id = :category_id,
+                    session.execute(text("""UPDATE transactions SET merchant_normalized = :merchant,
+                        category_id = :category_id, subcategory_id = :subcategory_id,
                         category_source = :source, category_rule_id = :rule_id, category_confidence = :confidence, updated_at = now()
-                        WHERE id = :id"""), {"merchant": rule["merchant_normalized"], "category_id": rule["category_id"], "source": rule["rule_type"], "rule_id": rule["id"], "confidence": rule["confidence"], "id": transaction["id"]})
+                        WHERE id = :id"""), {"merchant": rule["merchant_normalized"],
+                        "category_id": rule["category_id"], "subcategory_id": rule["subcategory_id"],
+                        "source": rule["rule_type"], "rule_id": rule["id"],
+                        "confidence": rule["confidence"], "id": transaction["id"]})
                     updated += 1
                     break
         return {"rules": len(rules), "transactions_updated": updated}
@@ -622,15 +731,19 @@ class LedgerService:
         account_id: UUID | None = None,
         account_type: str | None = None,
         category_id: UUID | None = None,
+        uncategorized: bool = False,
         query_text: str | None = None,
         limit: int = 100,
     ) -> list[dict[str, object]]:
         query = """
             SELECT t.id, t.financial_account_id, a.display_name AS account_name, t.transaction_date,
                    t.posted_date, t.narration, t.merchant_normalized, t.provider_reference, t.amount, t.currency, t.direction, t.transaction_kind,
-                   t.reconciliation_state, t.category_id, COALESCE(c.name, CASE WHEN t.transaction_kind = 'credit_card_payment' THEN 'Credit Card Bill Payment' END) AS category
+                   t.reconciliation_state, t.category_id, t.subcategory_id,
+                   COALESCE(c.name, CASE WHEN t.transaction_kind = 'credit_card_payment' THEN 'Credit Card Payment' END) AS category,
+                   subcategory.name AS subcategory
             FROM transactions t JOIN financial_accounts a ON a.id = t.financial_account_id
             LEFT JOIN categories c ON c.id = t.category_id
+            LEFT JOIN categories subcategory ON subcategory.id = t.subcategory_id
             WHERE t.user_id = :user_id
         """
         parameters: dict[str, object] = {"user_id": self.user_id}
@@ -648,6 +761,8 @@ class LedgerService:
         if category_id:
             query += " AND t.category_id = :category_id"
             parameters["category_id"] = category_id
+        elif uncategorized:
+            query += " AND t.category_id IS NULL"
         if query_text:
             query += " AND t.narration ILIKE :query_text"
             parameters["query_text"] = f"%{query_text.strip()}%"
@@ -662,6 +777,7 @@ class LedgerService:
         account_id: UUID | None = None,
         account_type: str | None = None,
         category_id: UUID | None = None,
+        uncategorized: bool = False,
         query_text: str | None = None,
         cursor: str | None = None,
         limit: int = 50,
@@ -669,9 +785,12 @@ class LedgerService:
         query = """
             SELECT t.id, t.financial_account_id, a.display_name AS account_name, t.transaction_date,
                    t.posted_date, t.narration, t.merchant_normalized, t.provider_reference, t.amount, t.currency, t.direction, t.transaction_kind,
-                   t.reconciliation_state, t.category_id, COALESCE(c.name, CASE WHEN t.transaction_kind = 'credit_card_payment' THEN 'Credit Card Bill Payment' END) AS category
+                   t.reconciliation_state, t.category_id, t.subcategory_id,
+                   COALESCE(c.name, CASE WHEN t.transaction_kind = 'credit_card_payment' THEN 'Credit Card Payment' END) AS category,
+                   subcategory.name AS subcategory
             FROM transactions t JOIN financial_accounts a ON a.id = t.financial_account_id
             LEFT JOIN categories c ON c.id = t.category_id
+            LEFT JOIN categories subcategory ON subcategory.id = t.subcategory_id
             WHERE t.user_id = :user_id
         """
         parameters: dict[str, object] = {"user_id": self.user_id}
@@ -689,6 +808,8 @@ class LedgerService:
         if category_id:
             query += " AND t.category_id = :category_id"
             parameters["category_id"] = category_id
+        elif uncategorized:
+            query += " AND t.category_id IS NULL"
         if query_text:
             query += " AND t.narration ILIKE :query_text"
             parameters["query_text"] = f"%{query_text.strip()}%"
@@ -726,13 +847,45 @@ class LedgerService:
                 fields.append(f"{field} = :{field}")
                 parameters[field] = _required_text(payload, field)
         if "category_id" in payload:
-            fields.extend(("category_id = :category_id", "category_source = 'manual'", "category_rule_id = NULL", "category_confidence = 1.0"))
+            fields.extend((
+                "category_id = :category_id",
+                "subcategory_id = :subcategory_id",
+                "category_source = 'manual'",
+                "category_rule_id = NULL",
+                "category_confidence = 1.0",
+            ))
             parameters["category_id"] = UUID(str(payload["category_id"])) if payload["category_id"] else None
+            parameters["subcategory_id"] = (
+                UUID(str(payload["subcategory_id"])) if payload.get("subcategory_id") else None
+            )
         if not fields:
             raise LedgerError("No mutable transaction fields were supplied")
         fields.append("version = version + 1")
         fields.append("updated_at = now()")
+        matching_transaction_count = 0
+        matched_merchant: str | None = None
         with Session(self.engine) as session, session.begin():
+            if parameters.get("category_id"):
+                category_exists = session.execute(
+                    text(
+                        """SELECT 1 FROM categories
+                           WHERE id = :category_id AND user_id = :user_id AND archived_at IS NULL"""
+                    ),
+                    parameters,
+                ).scalar_one_or_none()
+                if category_exists is None:
+                    raise LedgerError("Category was not found")
+                if parameters.get("subcategory_id"):
+                    subcategory_exists = session.execute(
+                        text(
+                            """SELECT 1 FROM categories
+                               WHERE id = :subcategory_id AND parent_id = :category_id
+                                 AND user_id = :user_id AND archived_at IS NULL"""
+                        ),
+                        parameters,
+                    ).scalar_one_or_none()
+                    if subcategory_exists is None:
+                        raise LedgerError("Subcategory does not belong to the selected category")
             result = session.execute(
                 text("UPDATE transactions SET " + ", ".join(fields) + " WHERE id = :id AND user_id = :user_id"),
                 parameters,
@@ -743,13 +896,125 @@ class LedgerService:
                 transaction = session.execute(text("SELECT narration, merchant_normalized FROM transactions WHERE id = :id AND user_id = :user_id"), parameters).mappings().one()
                 merchant = _normalize_merchant(transaction["merchant_normalized"] or transaction["narration"])
                 if merchant:
+                    matched_merchant = str(transaction["merchant_normalized"] or transaction["narration"])
                     session.execute(text("""INSERT INTO merchant_rules (id, user_id, match_pattern, merchant_normalized,
-                        category_id, priority, rule_type, confidence) VALUES (:id, :user_id, :pattern, :merchant,
-                        :category_id, 1, 'user_override', 1.0) ON CONFLICT (user_id, match_pattern) DO UPDATE
-                        SET category_id = EXCLUDED.category_id, merchant_normalized = EXCLUDED.merchant_normalized,
+                        category_id, subcategory_id, priority, rule_type, confidence)
+                        VALUES (:id, :user_id, :pattern, :merchant, :category_id, :subcategory_id,
+                        1, 'user_override', 1.0) ON CONFLICT (user_id, match_pattern) DO UPDATE
+                        SET category_id = EXCLUDED.category_id, subcategory_id = EXCLUDED.subcategory_id,
+                        merchant_normalized = EXCLUDED.merchant_normalized,
                         rule_type = 'user_override', confidence = 1.0, priority = 1, updated_at = now()"""),
-                        {"id": uuid4(), "user_id": self.user_id, "pattern": merchant, "merchant": transaction["merchant_normalized"] or transaction["narration"], "category_id": UUID(str(payload["category_id"]))})
-        return self._one("SELECT * FROM transactions WHERE id = :id", {"id": transaction_id})
+                        {"id": uuid4(), "user_id": self.user_id, "pattern": merchant,
+                         "merchant": transaction["merchant_normalized"] or transaction["narration"],
+                         "category_id": parameters["category_id"],
+                         "subcategory_id": parameters["subcategory_id"]})
+                    candidates = session.execute(
+                        text(
+                            """SELECT id, narration, merchant_normalized FROM transactions
+                               WHERE user_id = :user_id AND id <> :id AND category_id IS NULL"""
+                        ),
+                        parameters,
+                    ).mappings()
+                    matching_transaction_count = sum(
+                        1
+                        for candidate in candidates
+                        if _normalize_merchant(candidate["merchant_normalized"] or candidate["narration"]) == merchant
+                    )
+        updated = self._one(
+            "SELECT * FROM transactions WHERE id = :id AND user_id = :user_id",
+            {"id": transaction_id, "user_id": self.user_id},
+        )
+        updated["matching_transaction_count"] = matching_transaction_count
+        updated["matched_merchant"] = matched_merchant
+        return updated
+
+    def apply_category_to_matching_transactions(self, transaction_id: UUID) -> dict[str, object]:
+        """Apply a transaction's manual category to uncategorized rows for the same normalized merchant."""
+        with Session(self.engine) as session, session.begin():
+            source = session.execute(
+                text(
+                    """SELECT id, narration, merchant_normalized, category_id, subcategory_id
+                       FROM transactions WHERE id = :id AND user_id = :user_id"""
+                ),
+                {"id": transaction_id, "user_id": self.user_id},
+            ).mappings().one_or_none()
+            if source is None:
+                raise LedgerError("Transaction was not found")
+            if source["category_id"] is None:
+                raise LedgerError("Tag the selected transaction before applying its category to matches")
+            merchant = _normalize_merchant(source["merchant_normalized"] or source["narration"])
+            if not merchant:
+                raise LedgerError("The transaction does not contain a usable merchant")
+
+            candidates = session.execute(
+                text(
+                    """SELECT id, narration, merchant_normalized FROM transactions
+                       WHERE user_id = :user_id AND id <> :id AND category_id IS NULL"""
+                ),
+                {"id": transaction_id, "user_id": self.user_id},
+            ).mappings()
+            matching_ids = [
+                candidate["id"]
+                for candidate in candidates
+                if _normalize_merchant(candidate["merchant_normalized"] or candidate["narration"]) == merchant
+            ]
+            for matching_id in matching_ids:
+                session.execute(
+                    text(
+                        """UPDATE transactions
+                           SET category_id = :category_id, subcategory_id = :subcategory_id,
+                               category_source = 'manual',
+                               category_rule_id = NULL, category_confidence = 1.0,
+                               version = version + 1, updated_at = now()
+                           WHERE id = :id AND user_id = :user_id AND category_id IS NULL"""
+                    ),
+                    {
+                        "id": matching_id,
+                        "user_id": self.user_id,
+                        "category_id": source["category_id"],
+                        "subcategory_id": source["subcategory_id"],
+                    },
+                )
+        return {
+            "updated": len(matching_ids),
+            "merchant": source["merchant_normalized"] or source["narration"],
+            "category_id": source["category_id"],
+            "subcategory_id": source["subcategory_id"],
+        }
+
+    def category_match_preview(self, transaction_id: UUID) -> dict[str, object]:
+        """Return a fresh match count so confirmation is recoverable after the original category save."""
+        with Session(self.engine) as session:
+            source = session.execute(
+                text(
+                    """SELECT id, narration, merchant_normalized, category_id, subcategory_id
+                       FROM transactions WHERE id = :id AND user_id = :user_id"""
+                ),
+                {"id": transaction_id, "user_id": self.user_id},
+            ).mappings().one_or_none()
+            if source is None:
+                raise LedgerError("Transaction was not found")
+            merchant = _normalize_merchant(source["merchant_normalized"] or source["narration"])
+            candidates = session.execute(
+                text(
+                    """SELECT narration, merchant_normalized FROM transactions
+                       WHERE user_id = :user_id AND id <> :id AND category_id IS NULL"""
+                ),
+                {"id": transaction_id, "user_id": self.user_id},
+            ).mappings()
+            count = sum(
+                1
+                for candidate in candidates
+                if merchant
+                and _normalize_merchant(candidate["merchant_normalized"] or candidate["narration"]) == merchant
+            )
+        return {
+            "transaction_id": transaction_id,
+            "merchant": source["merchant_normalized"] or source["narration"],
+            "category_id": source["category_id"],
+            "subcategory_id": source["subcategory_id"],
+            "matching_transaction_count": count,
+        }
 
     def monthly_report(self, month: str) -> dict[str, object]:
         rows = self._rows(
@@ -1468,7 +1733,8 @@ class LedgerService:
         return {"created": created, "eligible": len(statements)}
 
     def list_notifications(self, state: str | None = None) -> list[dict[str, object]]:
-        query = """SELECT id, notification_kind, title, body, state, due_at, created_at
+        query = """SELECT id, notification_kind, title, body, state, due_at,
+                          action_kind, action_payload, created_at
                    FROM notifications WHERE user_id = :user_id"""
         parameters: dict[str, object] = {"user_id": self.user_id}
         if state:
@@ -1497,22 +1763,70 @@ class LedgerService:
     def balance_summary(self) -> dict[str, object]:
         rows = self._rows(
             """SELECT a.id, a.display_name, a.institution_code, a.account_type, a.currency,
-            COALESCE(SUM(CASE WHEN t.direction = 'credit' THEN t.amount ELSE -t.amount END), 0) AS signed_total
+            COALESCE(SUM(CASE WHEN t.direction = 'credit' THEN t.amount ELSE -t.amount END), 0) AS signed_total,
+            latest_statement.closing_balance AS statement_balance,
+            latest_statement.period_end AS statement_period_end,
+            latest_statement.confirmed_at AS statement_confirmed_at,
+            COALESCE(SUM(CASE
+                WHEN latest_statement.period_end IS NOT NULL AND t.transaction_date > latest_statement.period_end
+                THEN CASE WHEN t.direction = 'credit' THEN t.amount ELSE -t.amount END
+                ELSE 0 END), 0) AS activity_after_statement,
+            MAX(t.transaction_date) AS latest_transaction_date
             FROM financial_accounts a LEFT JOIN transactions t ON t.financial_account_id = a.id
+            LEFT JOIN LATERAL (
+                SELECT s.closing_balance, s.period_end, s.confirmed_at
+                FROM statements s
+                WHERE s.user_id = a.user_id AND s.financial_account_id = a.id
+                  AND s.state IN ('confirmed', 'reconciled')
+                  AND s.closing_balance IS NOT NULL AND s.period_end IS NOT NULL
+                ORDER BY s.period_end DESC, s.confirmed_at DESC NULLS LAST LIMIT 1
+            ) latest_statement ON true
             WHERE a.user_id = :user_id AND a.status = 'active'
-            GROUP BY a.id, a.display_name, a.institution_code, a.account_type, a.currency ORDER BY a.display_name"""
+            GROUP BY a.id, a.display_name, a.institution_code, a.account_type, a.currency,
+                     latest_statement.closing_balance, latest_statement.period_end,
+                     latest_statement.confirmed_at
+            ORDER BY a.display_name"""
         )
         cash = Decimal("0")
         liability = Decimal("0")
+        unavailable_bank_balances = 0
         accounts: list[dict[str, object]] = []
         for row in rows:
-            balance = row["signed_total"] if row["account_type"] == "bank_account" else -row["signed_total"]
-            accounts.append({**row, "balance": balance})
             if row["account_type"] == "bank_account":
-                cash += balance
+                has_statement_balance = row["statement_balance"] is not None
+                balance = (
+                    row["statement_balance"] + row["activity_after_statement"]
+                    if has_statement_balance
+                    else None
+                )
+                balance_source = "statement_plus_transactions" if has_statement_balance else "unavailable"
+                balance_as_of = row["latest_transaction_date"] or row["statement_period_end"]
+                if balance is None:
+                    unavailable_bank_balances += 1
+                else:
+                    cash += balance
             else:
+                balance = -row["signed_total"]
+                balance_source = "transactions"
+                balance_as_of = row["latest_transaction_date"]
                 liability += balance
-        return {"cash_balance": cash, "credit_card_outstanding": liability, "net_worth": cash - liability, "accounts": accounts}
+            accounts.append(
+                {
+                    **row,
+                    "balance": balance,
+                    "balance_source": balance_source,
+                    "balance_as_of": balance_as_of,
+                    "calculated_change": row["signed_total"],
+                }
+            )
+        return {
+            "cash_balance": cash,
+            "cash_balance_complete": unavailable_bank_balances == 0,
+            "unavailable_bank_balances": unavailable_bank_balances,
+            "credit_card_outstanding": liability,
+            "net_worth": cash - liability,
+            "accounts": accounts,
+        }
 
     def _require_account(self, account_id: UUID) -> None:
         self._one("SELECT id FROM financial_accounts WHERE id = :id AND user_id = :user_id AND status = 'active'", {"id": account_id, "user_id": self.user_id})
