@@ -311,7 +311,17 @@ def parse_pdf_statement_in_process(filename: str, content: bytes, password: str 
             raise LedgerError("PDF password is required or incorrect")
         pages = list(document)
         document_text = "\n".join(page.get_text("text") for page in pages)
-        positioned_text = "\n".join(_positioned_lines(page) for page in pages)
+        positioned_text = "\n".join(
+            "\n".join(
+                part
+                for part in (
+                    _positioned_lines(page),
+                    _positioned_deposit_withdrawal_lines(page),
+                )
+                if part
+            )
+            for page in pages
+        )
     except fitz.FileDataError as error:
         raise LedgerError("PDF statement could not be opened") from error
     finally:
@@ -326,15 +336,26 @@ def parse_pdf_statement_in_process(filename: str, content: bytes, password: str 
     parser = "icici_credit_card_pdf" if is_credit_card and "icici" in lowered else "icici_bank_pdf" if "icici" in lowered else "hdfc_bank_pdf" if "hdfc" in lowered else "sbi_bank_pdf" if is_sbi else "generic_pdf"
     parse_text = _sbi_savings_section(document_text) if is_sbi else document_text
     positioned_parse_text = _sbi_savings_section(positioned_text) if is_sbi else positioned_text
-    rows = _parse_rows(parse_text, is_credit_card=is_credit_card)
-    for positioned_row in _parse_rows(positioned_parse_text, is_credit_card=is_credit_card):
-        key = (positioned_row["transaction_date"], positioned_row["narration"], positioned_row["amount"], positioned_row["direction"])
-        if not any((row["transaction_date"], row["narration"], row["amount"], row["direction"]) == key for row in rows):
-            rows.append(positioned_row)
+    rows = _parse_rows(
+        parse_text,
+        is_credit_card=is_credit_card,
+        credit_before_debit=is_sbi,
+    )
+    for positioned_row in _parse_rows(
+        positioned_parse_text,
+        is_credit_card=is_credit_card,
+        credit_before_debit=is_sbi,
+    ):
+        _merge_extracted_row(rows, positioned_row)
     if not rows:
         raise LedgerError("Supported PDF statement format was detected but no transaction rows could be extracted")
     metadata = _metadata(parse_text)
     if not is_credit_card:
+        if metadata["opening_balance"] is None:
+            metadata["opening_balance"] = (
+                _brought_forward_balance(parse_text)
+                or _brought_forward_balance(positioned_parse_text)
+            )
         if metadata["period_start"] is None:
             metadata["period_start"] = min(row["transaction_date"] for row in rows)
         if metadata["period_end"] is None:
@@ -370,6 +391,11 @@ def _sbi_savings_section(value: str) -> str:
 def _sbi_account_section(line: str) -> bool | None:
     """Return True for savings, False for DL/TL loan, and None otherwise."""
     compact = " ".join(line.split())
+    # SBI relationship-summary statements label their combined loan section
+    # as ``DL/TL ACCOUNT``.  Treat the slash form as a hard boundary before
+    # looking for the more general account headings below.
+    if re.search(r"^\s*DL\s*/\s*TL\s+(?:bank\s+)?(?:account|a/c)\b", compact, re.I):
+        return False
     heading = bool(
         re.search(
             r"\b(?:account|a/c)\s*(?:type|category|product)\b"
@@ -380,7 +406,7 @@ def _sbi_account_section(line: str) -> bool | None:
     )
     explicit_section = bool(
         re.search(
-            r"^\s*(?:savings?|sb(?:chq)?|demand\s+loan|term\s+loan|DL|TL)"
+            r"^\s*(?:savings?|sb(?:chq)?|demand\s+loan|term\s+loan|DL(?:\s*/\s*TL)?|TL)"
             r"\s+(?:bank\s+)?(?:account|a/c)\b",
             compact,
             re.I,
@@ -395,7 +421,12 @@ def _sbi_account_section(line: str) -> bool | None:
     return None
 
 
-def _parse_rows(value: str, *, is_credit_card: bool) -> list[dict[str, object]]:
+def _parse_rows(
+    value: str,
+    *,
+    is_credit_card: bool,
+    credit_before_debit: bool = False,
+) -> list[dict[str, object]]:
     rows: list[dict[str, object]] = []
     patterns = (
         re.compile(r"(?P<date>\d{2}[/-]\d{2}[/-]\d{4})\s+(?P<narration>.+?)\s+(?P<amount>[\d,]+\.\d{2})\s*(?P<direction>DR|CR|DEBIT|CREDIT)\b", re.I),
@@ -414,18 +445,60 @@ def _parse_rows(value: str, *, is_credit_card: bool) -> list[dict[str, object]]:
                 break
             direction = "credit" if match["direction"].upper() in {"CR", "CREDIT"} else "debit"
             narration = match["narration"].strip(" -")
+            if _is_brought_forward(narration) or _is_statement_summary(narration):
+                break
             rows.append({"transaction_date": transaction_date, "posted_date": None, "narration": narration,
                          "amount": amount, "currency": "INR", "direction": direction,
                          "provider_reference": None, "raw_columns": {"line": compact}})
             break
-    for fallback in _parse_columnar_rows(value, is_credit_card=is_credit_card):
-        key = (fallback["transaction_date"], fallback["narration"], fallback["amount"], fallback["direction"])
-        if not any((row["transaction_date"], row["narration"], row["amount"], row["direction"]) == key for row in rows):
-            rows.append(fallback)
+    for fallback in _parse_columnar_rows(
+        value,
+        is_credit_card=is_credit_card,
+        credit_before_debit=credit_before_debit,
+    ):
+        _merge_extracted_row(rows, fallback)
     return sorted(rows, key=lambda row: (row["transaction_date"], row["narration"], row["amount"]))
 
 
-def _parse_columnar_rows(value: str, *, is_credit_card: bool) -> list[dict[str, object]]:
+def _merge_extracted_row(rows: list[dict[str, object]], candidate: dict[str, object]) -> None:
+    """Prefer a reconstructed wrapped row over its partial visual-line copy."""
+    generic_modes = {"mobile banking", "internet banking", "net banking"}
+    candidate_narration = str(candidate["narration"]).strip()
+    candidate_normalized = " ".join(candidate_narration.lower().split())
+    for index, existing in enumerate(rows):
+        if any(
+            existing[field] != candidate[field]
+            for field in ("transaction_date", "amount")
+        ):
+            continue
+        existing_narration = str(existing["narration"]).strip()
+        existing_normalized = " ".join(existing_narration.lower().split())
+        same_description = (
+            existing_normalized in candidate_normalized
+            or candidate_normalized in existing_normalized
+            or existing_normalized in generic_modes
+            or candidate_normalized in generic_modes
+        )
+        if not same_description:
+            continue
+        candidate_line = str(candidate.get("raw_columns", {}).get("line", ""))
+        existing_line = str(existing.get("raw_columns", {}).get("line", ""))
+        candidate_explicit = bool(re.search(r"\s(?:CR|DR)\s", candidate_line, re.I))
+        existing_explicit = bool(re.search(r"\s(?:CR|DR)\s", existing_line, re.I))
+        if candidate_explicit and not existing_explicit:
+            rows[index] = candidate
+        elif candidate_explicit == existing_explicit and len(candidate_narration) > len(existing_narration):
+            rows[index] = candidate
+        return
+    rows.append(candidate)
+
+
+def _parse_columnar_rows(
+    value: str,
+    *,
+    is_credit_card: bool,
+    credit_before_debit: bool = False,
+) -> list[dict[str, object]]:
     """Fallback for text PDFs where debit, credit, and balance are separate columns."""
     rows: list[dict[str, object]] = []
     previous_balance: Decimal | None = None
@@ -451,11 +524,16 @@ def _parse_columnar_rows(value: str, *, is_credit_card: bool) -> list[dict[str, 
         column_direction: str | None = None
         amount_values = [_money(amount) for amount in amounts]
         if not is_credit_card and len(amounts) >= 3:
-            debit_amount, credit_amount = amount_values[0], amount_values[1]
+            if credit_before_debit:
+                credit_amount, debit_amount = amount_values[0], amount_values[1]
+            else:
+                debit_amount, credit_amount = amount_values[0], amount_values[1]
             if debit_amount == 0 and credit_amount > 0:
-                amount_text, column_direction = amounts[1], "credit"
+                amount_text = amounts[0] if credit_before_debit else amounts[1]
+                column_direction = "credit"
             elif credit_amount == 0 and debit_amount > 0:
-                amount_text, column_direction = amounts[0], "debit"
+                amount_text = amounts[1] if credit_before_debit else amounts[0]
+                column_direction = "debit"
             previous_balance = amount_values[-1]
         elif not is_credit_card and len(amounts) == 2:
             running_balance = amount_values[-1]
@@ -464,6 +542,8 @@ def _parse_columnar_rows(value: str, *, is_credit_card: bool) -> list[dict[str, 
             previous_balance = running_balance
         narration = body[: money_pattern.search(body).start()].strip(" -:|")
         if len(narration) < 2 or narration.lower() in {"transaction", "description", "particulars"}:
+            continue
+        if _is_brought_forward(narration) or _is_statement_summary(narration):
             continue
         direction = column_direction or _column_direction(body, narration, is_credit_card)
         rows.append({"transaction_date": transaction_date, "posted_date": None, "narration": narration,
@@ -478,6 +558,12 @@ def _column_direction(body: str, narration: str, is_credit_card: bool) -> str:
     if re.search(r"\b(?:dr|debit)\b", body, re.I):
         return "debit"
     if is_credit_card and re.search(r"\b(?:payment received|payment|cashback|adjustment)\b", narration, re.I):
+        return "credit"
+    if not is_credit_card and re.search(
+        r"\b(?:savings?|sb)\s+int\.?\b|\binterest\s+(?:paid|credited)\b",
+        narration,
+        re.I,
+    ):
         return "credit"
     return "debit"
 
@@ -506,13 +592,58 @@ def _metadata(value: str) -> dict[str, object]:
         r"(\d{1,2}[/-][A-Za-z]{3}[/-]\d{2,4}|\d{1,2}[/-]\d{1,2}[/-]\d{2,4})",
     )
     return {"period_start": period_start,
-            "period_end": period_end, "opening_balance": _find_money(value, r"opening\s+balance\D{0,20}([\d,]+\.\d{2})"),
-            "closing_balance": _find_money(value, r"closing\s+balance\D{0,20}([\d,]+\.\d{2})"),
+            "period_end": period_end,
+            "opening_balance": _find_money(
+                value,
+                r"opening\s+balance(?:\s+on\s+\d{1,2}[/-]\d{1,2}[/-]\d{2,4})?\D{0,20}([\d,]+\.\d{2})",
+            ),
+            "closing_balance": _find_money(
+                value,
+                r"closing\s+balance(?:\s+on\s+\d{1,2}[/-]\d{1,2}[/-]\d{2,4})?\D{0,20}([\d,]+\.\d{2})",
+            ),
             "statement_amount": _find_money(value, r"(?:total\s+amount\s+due|statement\s+amount)\D{0,20}([\d,]+\.\d{2})"),
             "minimum_due": _find_money(value, r"minimum\s+(?:amount\s+)?due\D{0,20}([\d,]+\.\d{2})"),
             "due_date": _find_date(value, r"payment\s+due\s+date\D{0,20}(\d{1,2}[/-][A-Za-z]{3}[/-]\d{2,4}|\d{2}[/-]\d{2}[/-]\d{4})"),
             "total_limit": _find_money(value, r"total\s+credit\s+limit\D{0,20}([\d,]+\.\d{2})"),
             "available_limit": _find_money(value, r"available\s+credit\s+limit\D{0,20}([\d,]+\.\d{2})")}
+
+
+def _is_brought_forward(narration: str) -> bool:
+    """Identify balance carry-forward labels that are not ledger activity."""
+    return bool(
+        re.search(
+            r"(?:^|\b)b\s*/\s*f(?:\b|$)|\bbrought\s+forward\b|\bbalance\s+b/f\b",
+            narration,
+            re.I,
+        )
+    )
+
+
+def _is_statement_summary(narration: str) -> bool:
+    """Reject dated-looking statement totals, addresses, and balance summaries."""
+    return bool(
+        re.search(
+            r"\btotal\s+(?:deposits?\s*(?:&|and)\s*investments?|balance|assets?)\b"
+            r"|\b(?:closing|current|available)\s+balance\b",
+            narration,
+            re.I,
+        )
+    )
+
+
+def _brought_forward_balance(value: str) -> Decimal | None:
+    """Use the final amount on a B/F row as the statement opening balance."""
+    money_pattern = re.compile(
+        r"(?<![\d/.-])(?:₹|rs\.?\s*)?([\d,]+\.\d{2})(?![\d.])",
+        re.I,
+    )
+    for line in value.splitlines():
+        if not _is_brought_forward(line):
+            continue
+        amounts = money_pattern.findall(line)
+        if amounts:
+            return _money(amounts[-1])
+    return None
 
 
 def _last_running_balance(rows: list[dict[str, object]]) -> Decimal | None:
@@ -622,3 +753,116 @@ def _positioned_lines(page: fitz.Page) -> str:
         else:
             lines[-1].append(word)
     return "\n".join(" ".join(str(word[4]) for word in line) for line in lines)
+
+
+def _positioned_deposit_withdrawal_lines(page: fitz.Page) -> str:
+    """Rebuild wrapped bank rows using the table's visual column positions.
+
+    ICICI savings statements render a transaction's date, mode, multi-line
+    particulars, deposit, withdrawal, and balance in separate text boxes. A
+    normal text extraction can therefore put the date and amount on different
+    lines. The visible column headers provide stable x-axis boundaries, while
+    transaction dates provide the y-axis row anchors.
+    """
+    words = list(page.get_text("words"))
+    header_positions: dict[str, float] = {}
+    for word in words:
+        label = str(word[4]).upper().rstrip(":")
+        if label in {"DATE", "MODE", "PARTICULARS", "DEPOSITS", "WITHDRAWALS", "BALANCE"}:
+            header_positions.setdefault(label, float(word[0]))
+    required = {"DATE", "PARTICULARS", "DEPOSITS", "WITHDRAWALS", "BALANCE"}
+    if not required.issubset(header_positions):
+        return ""
+
+    date_pattern = re.compile(r"^\d{1,2}[/-]\d{1,2}[/-]\d{2,4}$")
+    date_words = sorted(
+        (word for word in words if date_pattern.fullmatch(str(word[4]))),
+        key=lambda word: float(word[1]),
+    )
+    if not date_words:
+        return ""
+
+    particulars_x = header_positions["PARTICULARS"]
+    deposits_x = header_positions["DEPOSITS"]
+    withdrawals_x = header_positions["WITHDRAWALS"]
+    balance_x = header_positions["BALANCE"]
+    money_pattern = re.compile(r"^(?:₹|rs\.?\s*)?[\d,]+\.\d{2}$", re.I)
+
+    def money_cells(start: float, end: float | None = None) -> list[tuple[object, ...]]:
+        return [
+            word
+            for word in words
+            if float(word[0]) >= start
+            and (end is None or float(word[0]) < end)
+            and money_pattern.fullmatch(str(word[4]))
+        ]
+
+    balance_cells = money_cells(balance_x)
+    used_balance_cells: set[int] = set()
+    reconstructed: list[str] = []
+    for index, date_word in enumerate(date_words):
+        anchor_y = (float(date_word[1]) + float(date_word[3])) / 2
+        previous_y = (
+            (float(date_words[index - 1][1]) + float(date_words[index - 1][3])) / 2
+            if index > 0
+            else anchor_y - 80
+        )
+        next_y = (
+            (float(date_words[index + 1][1]) + float(date_words[index + 1][3])) / 2
+            if index + 1 < len(date_words)
+            else anchor_y + 80
+        )
+        top = max((previous_y + anchor_y) / 2, anchor_y - 32)
+        bottom = min((anchor_y + next_y) / 2, anchor_y + 32)
+        row_words = [
+            word
+            for word in words
+            if top <= (float(word[1]) + float(word[3])) / 2 < bottom
+            and word is not date_word
+        ]
+
+        def column_text(start: float, end: float | None = None) -> str:
+            selected = [
+                word
+                for word in row_words
+                if float(word[0]) >= start and (end is None or float(word[0]) < end)
+            ]
+            selected.sort(key=lambda word: (round(float(word[1]) / 3), float(word[0])))
+            return " ".join(str(word[4]) for word in selected).strip()
+
+        narration = column_text(particulars_x, deposits_x)
+        available_balances = [
+            word for word in balance_cells if id(word) not in used_balance_cells
+        ]
+        if not available_balances:
+            continue
+        balance_word = min(
+            available_balances,
+            key=lambda word: abs(((float(word[1]) + float(word[3])) / 2) - anchor_y),
+        )
+        used_balance_cells.add(id(balance_word))
+        balance_y = (float(balance_word[1]) + float(balance_word[3])) / 2
+
+        def nearest_amount(start: float, end: float) -> str:
+            candidates = money_cells(start, end)
+            if not candidates:
+                return ""
+            nearest = min(
+                candidates,
+                key=lambda word: abs(((float(word[1]) + float(word[3])) / 2) - balance_y),
+            )
+            distance = abs(((float(nearest[1]) + float(nearest[3])) / 2) - balance_y)
+            return str(nearest[4]) if distance <= 14 else ""
+
+        deposit = nearest_amount(deposits_x, withdrawals_x)
+        withdrawal = nearest_amount(withdrawals_x, balance_x)
+        balance = str(balance_word[4])
+        if not narration or not balance:
+            continue
+        if deposit and re.search(r"\d", deposit):
+            reconstructed.append(f"{date_word[4]} {narration} {deposit} CR {balance}")
+        elif withdrawal and re.search(r"\d", withdrawal):
+            reconstructed.append(f"{date_word[4]} {narration} {withdrawal} DR {balance}")
+        elif _is_brought_forward(narration):
+            reconstructed.append(f"{date_word[4]} {narration} 0.00 CR {balance}")
+    return "\n".join(reconstructed)

@@ -275,6 +275,27 @@ class AccountDiscoveryIdentityTests(unittest.TestCase):
             ),
         )
 
+    def test_detects_onecard_from_html_when_plain_part_is_null(self) -> None:
+        detected = discover_financial_product(
+            _multipart_email(
+                "no-reply@getonecard.app",
+                "Your Federal Bank One Credit Card ending in 4321 was used "
+                "to make a payment. Amount: INR 900.00 Merchant: SYNTHETIC "
+                "MERCHANT Date: 30/07/2026.",
+            )
+        )
+
+        self.assertEqual(
+            detected,
+            (
+                "onecard",
+                {
+                    "financial_account_hint": "credit_card_ending_4321",
+                    "currency": "INR",
+                },
+            ),
+        )
+
     def test_ignores_starting_digits_without_an_ending(self) -> None:
         detected = discover_financial_product(
             _email(
@@ -355,6 +376,20 @@ def _email(sender: str, body: str) -> bytes:
         "MIME-Version: 1.0\n"
         'Content-Type: text/plain; charset="utf-8"\n'
         f"\n{body}\n"
+    ).encode()
+
+
+def _multipart_email(sender: str, html_body: str) -> bytes:
+    return (
+        f"From: Card Alerts <{sender}>\n"
+        "To: owner@example.invalid\n"
+        "Subject: Payment update\n"
+        "MIME-Version: 1.0\n"
+        'Content-Type: multipart/alternative; boundary="arcis-test"\n\n'
+        "--arcis-test\nContent-Type: text/plain; charset=utf-8\n\nnull\n"
+        "--arcis-test\nContent-Type: text/html; charset=utf-8\n\n"
+        f"<html><body>{html_body}</body></html>\n"
+        "--arcis-test--\n"
     ).encode()
 
 

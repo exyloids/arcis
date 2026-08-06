@@ -31,12 +31,19 @@ starting work. Complete tasks in order and record evidence in `STATUS.md`.
 - [x] **GMAIL-006** Discover bank accounts and credit cards from Gmail alerts,
   require product-level confirmation before ledger materialization, and
   persist rejected-product decisions so future matching alerts are skipped.
+- [x] **GMAIL-007** Make the Home refresh action synchronize every connected
+  mailbox asynchronously, report completion counters, refresh application
+  data, and perform a bounded recent scan before establishing a first cursor.
 
 ## Phase 3 — Statements and reconciliation
 
 - [x] **STATEMENT-001** Implement private PDF statement staging, preview, and confirmation for manual uploads.
 - [x] **STATEMENT-002** Detect and stage PDF statement attachments discovered during Gmail synchronization.
 - [x] **STATEMENT-003** Extract initial ICICI/HDFC statement rows and statement/card metadata through versioned deterministic parsers.
+- [x] **STATEMENT-004** Harden savings-statement parsing for real ICICI, SBI,
+  and DCB layouts: reconstruct wrapped visual rows, preserve deposit/withdrawal
+  direction, exclude balance summaries, and isolate savings sections from
+  loan-account sections.
 - [x] **RECONCILIATION-001** Match statement rows to canonical transactions, retain evidence, and create statement-only transactions for missed alerts.
 - [x] **RECONCILIATION-002** Provide a review queue for uncertain matches, including explicit accept/reject decisions without data loss.
 

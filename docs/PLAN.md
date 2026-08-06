@@ -464,6 +464,8 @@ Synchronization modes:
 
 - Daily scheduled synchronization
 - Asynchronous **Sync Now** for one mailbox or all mailboxes
+- Home-level refresh for all connected mailboxes, followed by a dashboard data
+  refresh when every queued job reaches a terminal state
 
 Every sync returns understandable counters, for example:
 
@@ -475,6 +477,9 @@ Required behavior:
 - Use provider message IDs as one idempotency layer.
 - Advance the history cursor only after safely recording processed artifacts.
 - Recover from expired cursors with a bounded rescan.
+- When a mailbox has no cursor, perform a bounded recent-message scan before
+  establishing the initial cursor so the first user-requested refresh retrieves
+  recent alerts and statements instead of silently returning no data.
 - Prevent concurrent syncs for the same mailbox with a distributed lock.
 - Make retries safe.
 - Store unsupported messages as metadata plus a protected review reference, subject to retention policy.
@@ -496,6 +501,18 @@ Statements may provide:
 For protected PDFs, the password is supplied over TLS, held only as long as the processing job requires, excluded from logs and job payloads, and never persisted.
 
 OCR is a fallback, not a default. OCR-derived fields require lower confidence and stronger review behavior.
+
+Institution-specific statement adapters must preserve document structure, not
+only extracted text order. In particular:
+
+- Associate transaction tables with their preceding account section.
+- Import SBI Savings/SB sections and exclude DL/TL, demand-loan, and term-loan
+  sections from both transactions and balance observations.
+- Reconstruct wrapped ICICI rows using the visual Date, Particulars, Deposits,
+  Withdrawals, and Balance columns.
+- Treat brought-forward and account-summary balances as observations rather
+  than transactions.
+- Use a statement's institution-specific debit/credit column order.
 
 ### 8.4 Import lifecycle
 
@@ -865,6 +882,9 @@ Work:
   alerts unless the user explicitly reopens the decision.
 - Implement first ICICI and HDFC email parsers.
 - Add **Sync Now** and scheduled daily sync.
+- Make the global Home refresh action synchronize all connected mailboxes,
+  wait for their durable jobs, show progress/results, and then reload dashboard
+  data.
 - Show progress, counters, health, and actionable errors.
 - Add a safe unsupported-message review queue.
 - Add parser metrics, retries, and dead-letter handling.
@@ -885,6 +905,8 @@ Work:
 - Manual PDF upload and protected-PDF workflow.
 - Extract PDF attachments from Gmail.
 - Build versioned institution-specific statement parsers.
+- Preserve account-section and visual-column boundaries for consolidated and
+  wrapped statement layouts, including ICICI, SBI, and DCB savings statements.
 - Add statement preview and confirmation.
 - Match email records to statement entries.
 - Add missing statement-only transactions.

@@ -59,8 +59,7 @@ class GmailArtifactRepository:
             message_date = parsedate_to_datetime(str(message.get("Date") or "")).isoformat()
         except (TypeError, ValueError):
             message_date = ""
-        message_text = message.get_body(preferencelist=("plain", "html"))
-        searchable_text = f"{subject} {message_text.get_content() if message_text else ''}"
+        searchable_text = f"{subject} {_message_searchable_text(message)}"
         for ordinal, part in enumerate(message.iter_attachments(), start=1):
             content = part.get_payload(decode=True)
             if not isinstance(content, bytes) or not content.startswith(b"%PDF"):
@@ -207,8 +206,41 @@ def _statement_password_guidance(value: str) -> str:
     """Return useful password instructions without copying a credential value."""
     compact = " ".join(re.sub(r"<[^>]+>", " ", value).split())
     lowered = compact.lower()
+    if "icici" in lowered and "statement" in lowered:
+        return (
+            "Use the first four letters of your name as it appears on your card, "
+            "followed by your date of birth in DDMM format. Enter the letters in "
+            "lowercase with no spaces or special characters."
+        )
     if not re.search(r"\b(?:password|passcode|open the (?:pdf|statement))\b", lowered):
         return "Check the bank's statement email for its PDF password instructions."
+    if (
+        re.search(r"\bdcb\s+bank\s+customer\s+id\b", lowered)
+        and re.search(r"\b10[-\s]?digit\s+pan\b", lowered)
+        and "uppercase" in lowered
+    ):
+        return (
+            "Use your DCB Bank Customer ID or the primary account holder's "
+            "10-digit PAN in uppercase as the PDF password."
+        )
+    if (
+        re.search(r"\blast\s+five\s+digits\b", lowered)
+        and re.search(r"\bregistered\s+mobile\s+number\b", lowered)
+        and re.search(r"\b(?:date of birth|dob)\b", lowered)
+        and "ddmmyy" in lowered
+    ):
+        return (
+            "Use the last five digits of your registered mobile number followed "
+            "by your date of birth in DDMMYY format as the PDF password."
+        )
+    if (
+        "hdfc" in lowered
+        and re.search(
+            r"\benter\s+your\s+customer\s+id\s+as\s+the\s+password\b",
+            lowered,
+        )
+    ):
+        return "Use your HDFC Customer ID as the PDF password."
     if re.search(r"\bcustomer\s*(?:id|number)\b", lowered):
         return "Use your Customer ID as the PDF password."
     if re.search(r"\b(?:date of birth|dob)\b", lowered):
@@ -227,3 +259,16 @@ def _statement_password_guidance(value: str) -> str:
             "does not copy it; open the bank email and enter it here."
         )
     return "Follow the PDF password instructions in the bank's statement email."
+
+
+def _message_searchable_text(message: object) -> str:
+    """Combine usable MIME alternatives, ignoring provider `null` placeholders."""
+    values: list[str] = []
+    for part in message.walk():
+        if part.get_content_type() not in {"text/plain", "text/html"}:
+            continue
+        value = str(part.get_content())
+        if not value.strip() or value.strip().lower() in {"null", "none"}:
+            continue
+        values.append(value)
+    return " ".join(values)

@@ -217,6 +217,34 @@ def parse_dcb_alert(raw_message: bytes) -> dict[str, object]:
     )
 
 
+def parse_onecard_alert(raw_message: bytes) -> dict[str, object]:
+    """Parse Federal Bank OneCard purchase alerts."""
+    message = BytesParser(policy=policy.default).parsebytes(raw_message)
+    if _sender_institution(message) != "onecard":
+        raise ParserError("Message sender is not a OneCard alert sender")
+    text = _message_text(message)
+    match = re.search(
+        r"(?:Federal\s+(?:Bank\s+)?One\s+)?Credit\s+Card\s+ending\s+in\s+"
+        r"([Xx*\d\s-]+?)\s+was\s+used\s+to\s+make\s+a\s+payment\.\s*"
+        r"Amount\s*:\s*INR\s*([\d,.]+)\s+Merchant\s*:\s*(.+?)\s+"
+        r"Date\s*:\s*(\d{1,2}/\d{1,2}/\d{2,4})",
+        text,
+        re.I | re.S,
+    )
+    if match is None:
+        raise ParserError("Unsupported OneCard transaction alert format")
+    identifier, amount, merchant, date_text = match.groups()
+    return _transaction_flexible_date(
+        "credit_card",
+        identifier,
+        amount,
+        date_text,
+        merchant,
+        _stable_reference(raw_message, "onecard-payment"),
+        "debit",
+    )
+
+
 def parse_supported_alert(raw_message: bytes) -> dict[str, object]:
     institution = institution_for_message(raw_message)
     if institution == "icici":
@@ -229,6 +257,8 @@ def parse_supported_alert(raw_message: bytes) -> dict[str, object]:
         return parse_sbi_alert(raw_message)
     if institution == "dcb":
         return parse_dcb_alert(raw_message)
+    if institution == "onecard":
+        return parse_onecard_alert(raw_message)
     if institution:
         raise ParserError(
             f"Unsupported {institution.upper()} transaction alert format"
@@ -337,7 +367,8 @@ def _looks_like_transaction_alert(text: str) -> bool:
         r"\b(?:debited|credited|spent|withdrawn|deposited|"
         r"payment\s+(?:of|received)|received\s+towards|purchase(?:d)?|"
         r"transaction\s+of|"
-        r"used\s+for\s+(?:a\s+)?transaction)\b",
+        r"used\s+for\s+(?:a\s+)?transaction|"
+        r"used\s+to\s+make\s+(?:a\s+)?payment)\b",
         text,
         re.I,
     )
@@ -345,9 +376,18 @@ def _looks_like_transaction_alert(text: str) -> bool:
 
 
 def _message_text(message: object) -> str:
-    body = message.get_body(preferencelist=("plain", "html"))
-    value = body.get_content() if body else ""
-    return re.sub(r"\s+", " ", unescape(re.sub(r"<[^>]+>", " ", value)))
+    # Some providers publish a literal `null` text/plain placeholder beside a
+    # complete HTML body. Treat placeholders as absent instead of allowing
+    # them to hide the usable MIME alternative.
+    for content_type in ("plain", "html"):
+        body = message.get_body(preferencelist=(content_type,))
+        value = str(body.get_content()) if body else ""
+        if not value.strip() or value.strip().lower() in {"null", "none"}:
+            continue
+        if content_type == "html":
+            value = re.sub(r"<[^>]+>", " ", value)
+        return re.sub(r"\s+", " ", unescape(value)).strip()
+    return ""
 
 
 def _transaction_flexible_date(

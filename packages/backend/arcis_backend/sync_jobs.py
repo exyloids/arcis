@@ -21,6 +21,7 @@ ACCOUNT_DISCOVERY_QUERY = (
     "from:(icicibank.com) from:(icici.bank.in) from:(yes.bank.in) "
     "from:(sbi.bank.in) from:(dcbbank.com) from:(getonecard.app)} newer_than:5y"
 )
+RECENT_SYNC_QUERY = ACCOUNT_DISCOVERY_QUERY.replace("newer_than:5y", "newer_than:30d")
 
 
 class SyncJobError(ValueError):
@@ -219,9 +220,29 @@ class GmailSyncJobService:
             access_token = oauth.refresh_access_token(mailboxes.active_refresh_token(mailbox_id))
             cursor = mailbox.get("history_cursor")
             if not isinstance(cursor, str) or not cursor:
+                # A first-time Home refresh must be useful. Establishing only
+                # a History cursor would ignore recent alerts and statements
+                # already present in Gmail, so perform one bounded recent scan
+                # before recording the incremental-sync baseline.
+                result = self.backfill(
+                    mailbox_id,
+                    RECENT_SYNC_QUERY,
+                    mailboxes,
+                    oauth,
+                    artifacts,
+                    candidates,
+                    max_results=500,
+                )
                 history_cursor = oauth.current_history_id(access_token)
                 mailboxes.set_history_cursor(mailbox_id, history_cursor)
-                return self.finish(job["id"], {"mailbox_id": str(mailbox_id), "mode": "baseline", "scanned": 0, "added": 0})
+                return self.finish(
+                    job["id"],
+                    {
+                        "mailbox_id": str(mailbox_id),
+                        "mode": "baseline_recent",
+                        **result,
+                    },
+                )
             try:
                 message_ids, next_cursor = oauth.history_message_ids(access_token, cursor)
             except GmailOAuthError as error:

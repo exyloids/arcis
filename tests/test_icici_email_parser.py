@@ -6,6 +6,7 @@ from arcis_backend.parsers import (
     parse_dcb_alert,
     parse_hdfc_alert,
     parse_icici_alert,
+    parse_onecard_alert,
     parse_sbi_alert,
     parse_yes_alert,
 )
@@ -107,6 +108,22 @@ class IciciEmailParserTests(unittest.TestCase):
         self.assertEqual(parsed["transaction_date"], "2026-07-30")
         self.assertEqual(parsed["direction"], "debit")
 
+    def test_onecard_html_alert_ignores_null_plain_part(self):
+        parsed = parse_onecard_alert(
+            _multipart_email(
+                "no-reply@getonecard.app",
+                "Your Federal Bank One Credit Card ending in 8765 was used "
+                "to make a payment. Amount: INR 425.50 Merchant: SYNTHETIC "
+                "MERCHANT Date: 30/07/2026 Time: 10:30:00",
+            )
+        )
+
+        self.assertEqual(parsed["financial_account_hint"], "credit_card_ending_8765")
+        self.assertEqual(parsed["transaction_date"], "2026-07-30")
+        self.assertEqual(parsed["amount"], "425.50")
+        self.assertEqual(parsed["merchant"], "SYNTHETIC MERCHANT")
+        self.assertEqual(parsed["direction"], "debit")
+
 
 def _email(sender: str, body: str) -> bytes:
     return (
@@ -116,4 +133,18 @@ def _email(sender: str, body: str) -> bytes:
         "MIME-Version: 1.0\n"
         'Content-Type: text/plain; charset="utf-8"\n'
         f"\n{body}\n"
+    ).encode()
+
+
+def _multipart_email(sender: str, html_body: str) -> bytes:
+    return (
+        f"From: Card Alerts <{sender}>\n"
+        "To: owner@example.invalid\n"
+        "Subject: Payment update\n"
+        "MIME-Version: 1.0\n"
+        'Content-Type: multipart/alternative; boundary="arcis-test"\n\n'
+        "--arcis-test\nContent-Type: text/plain; charset=utf-8\n\nnull\n"
+        "--arcis-test\nContent-Type: text/html; charset=utf-8\n\n"
+        f"<html><body>{html_body}</body></html>\n"
+        "--arcis-test--\n"
     ).encode()

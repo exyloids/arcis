@@ -1,7 +1,7 @@
 "use client";
 
 import { ChangeEvent, FormEvent, type ReactNode, useEffect, useRef, useState } from "react";
-import { Apple, Armchair, BatteryCharging, Beef, Bell, Bike, BookOpen, Briefcase, Building2, BusFront, Cake, CalendarDays, Car, CircleDollarSign, Coffee, CreditCard, Droplets, Dumbbell, Flame, Footprints, Fuel, Gamepad2, Gem, Gift, HeartPulse, House, Landmark, Milk, Monitor, MoreHorizontal, Music2, Package, ParkingCircle, PartyPopper, PenLine, Phone, Pill, Pizza, Plane, Scissors, ShieldCheck, Shirt, ShoppingBasket, Sparkles, Sprout, Stethoscope, TestTube, Ticket, ToyBrick, TrainFront, Truck, Trophy, Tv, Users, Utensils, Wifi, Wine, Wrench, Zap, type LucideIcon } from "lucide-react";
+import { Apple, Armchair, BatteryCharging, Beef, Bell, Bike, BookOpen, Briefcase, Building2, BusFront, Cake, CalendarDays, Car, CircleDollarSign, Coffee, CreditCard, Droplets, Dumbbell, Flame, Footprints, Fuel, Gamepad2, Gem, Gift, HeartPulse, House, Landmark, Milk, Monitor, MoreHorizontal, Music2, Package, ParkingCircle, PartyPopper, PenLine, Phone, Pill, Pizza, Plane, RefreshCw, Scissors, ShieldCheck, Shirt, ShoppingBasket, Sparkles, Sprout, Stethoscope, TestTube, Ticket, ToyBrick, TrainFront, Truck, Trophy, Tv, Users, Utensils, Wifi, Wine, Wrench, Zap, type LucideIcon } from "lucide-react";
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
 const navigation = [
@@ -104,6 +104,7 @@ export default function HomePage() {
   const [statementNotification, setStatementNotification] = useState<NotificationItem | null>(null);
   const [privacyInventory, setPrivacyInventory] = useState<PrivacyInventory | null>(null);
   const [hasLoaded, setHasLoaded] = useState(false);
+  const [isSyncing, setIsSyncing] = useState(false);
   const dialogReturnFocus = useRef<HTMLElement | null>(null);
   const [backfillMailboxId, setBackfillMailboxId] = useState("");
   const [backfillQuery, setBackfillQuery] = useState("from:(alerts@alerts.icicibank.com OR alerts@alerts.hdfcbank.com) newer_than:365d");
@@ -377,7 +378,45 @@ export default function HomePage() {
   async function updateRetention(event: FormEvent<HTMLFormElement>) { event.preventDefault(); const form = event.currentTarget; try { await request("/api/v1/privacy/retention", { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify(Object.fromEntries(new FormData(form))) }); setMessage("Retention settings updated."); await refresh(); } catch (error) { setMessage((error as Error).message); } }
   async function enforceRetention() { if (!window.confirm("Apply the retention policy now? Expired raw source files will enter a 30-day recovery window.")) return; try { const result = await request<{ redacted: number; purged: number }>("/api/v1/privacy/retention/enforce", { method: "POST" }); setMessage(`Retention complete: ${result.redacted} file(s) moved to recovery and ${result.purged} expired recovery file(s) purged.`); await refresh(); } catch (error) { setMessage((error as Error).message); } }
   async function syncMailbox(mailboxId: string) { try { const job = await request<{ id: string }>(`/api/v1/mailboxes/${mailboxId}/sync`, { method: "POST" }); setMessage(`Sync queued: ${job.id}`); } catch (error) { setMessage((error as Error).message); } }
-  async function waitForSyncJob(jobId: string) { for (let attempt = 0; attempt < 240; attempt += 1) { const job = await request<{ state: string; error_code: string | null; progress: Record<string, number> }>(`/api/v1/sync-jobs/${jobId}`); if (job.state === "completed") return job; if (job.state === "failed") throw new Error(job.error_code === "gmail_reconnect_required" ? "Reconnect Gmail and try again." : "Gmail scan failed. Check the worker logs and try again."); await new Promise((resolve) => window.setTimeout(resolve, 1000)); } throw new Error("The Gmail scan is still running. Refresh this page in a moment to see detected products."); }
+  async function waitForSyncJob(jobId: string) { for (let attempt = 0; attempt < 240; attempt += 1) { const job = await request<{ state: string; error_code: string | null; progress: Record<string, number | string> }>(`/api/v1/sync-jobs/${jobId}`); if (job.state === "completed") return job; if (job.state === "failed") throw new Error(job.error_code === "gmail_reconnect_required" ? "Reconnect Gmail and try again." : "Gmail scan failed. Check the worker logs and try again."); await new Promise((resolve) => window.setTimeout(resolve, 1000)); } throw new Error("The Gmail scan is still running. Refresh this page in a moment to see detected products."); }
+  async function syncConnectedMailboxes() {
+    if (isSyncing) return;
+    const connected = mailboxes.filter((mailbox) => mailbox.connection_status === "connected");
+    if (!connected.length) {
+      setMessage("Connect Gmail before refreshing transactions and statements.");
+      return;
+    }
+    setIsSyncing(true);
+    setMessage(`Checking ${connected.length} connected mailbox${connected.length === 1 ? "" : "es"} for new transactions and statements…`);
+    try {
+      const queued = await Promise.all(
+        connected.map((mailbox) => request<{ id: string }>(`/api/v1/mailboxes/${mailbox.id}/sync`, { method: "POST" })),
+      );
+      const results = await Promise.allSettled(queued.map((job) => waitForSyncJob(job.id)));
+      const completed = results.filter((result) => result.status === "fulfilled");
+      const failed = results.length - completed.length;
+      const totals = completed.reduce(
+        (summary, result) => {
+          if (result.status !== "fulfilled") return summary;
+          summary.scanned += Number(result.value.progress.scanned ?? 0);
+          summary.added += Number(result.value.progress.added ?? 0);
+          return summary;
+        },
+        { scanned: 0, added: 0 },
+      );
+      await refresh();
+      setMessage(
+        failed
+          ? `Refresh finished with ${failed} failed mailbox sync${failed === 1 ? "" : "s"}. ${totals.scanned} emails checked and ${totals.added} new emails added.`
+          : `Refresh complete: ${totals.scanned} emails checked and ${totals.added} new emails added.`,
+      );
+    } catch (error) {
+      setMessage((error as Error).message);
+      await refresh().catch(() => undefined);
+    } finally {
+      setIsSyncing(false);
+    }
+  }
   async function discoverMailboxAccounts(mailboxId: string) { try { setMessage("Gmail account scan queued…"); const queued = await request<{ id: string }>(`/api/v1/mailboxes/${mailboxId}/discover-accounts`, { method: "POST" }); const job = await waitForSyncJob(queued.id); setMessage(`Scan complete: ${job.progress.scanned ?? 0} emails checked, ${job.progress.products_detected ?? 0} products detected, ${job.progress.new_products ?? 0} new.`); await refresh(); } catch (error) { setMessage((error as Error).message); await refresh(); } }
   async function confirmDiscoveredAccount(event: FormEvent<HTMLFormElement>, id: string) { event.preventDefault(); const form = event.currentTarget; try { const result = await request<{ transactions_imported: number }>(`/api/v1/discovered-accounts/${id}/confirm`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(Object.fromEntries(new FormData(form))) }); setMessage(`Account added. ${result.transactions_imported} detected transaction(s) imported.`); await refresh(); } catch (error) { setMessage((error as Error).message); } }
   async function rejectDiscoveredAccount(id: string) { if (!window.confirm("Ignore this account or card? Its current and future detected transactions will be skipped.")) return; try { await request(`/api/v1/discovered-accounts/${id}/reject`, { method: "POST" }); setMessage("Account ignored. Future matching transactions will be skipped."); await refresh(); } catch (error) { setMessage((error as Error).message); } }
@@ -418,7 +457,7 @@ export default function HomePage() {
   return <main className="app-shell">
     <aside className="sidebar"><button className="brand" onClick={() => setActiveView("home")} aria-label="Go to home"><span>₹</span>Arcis</button><nav>{navigation.map(([view, label]) => <button key={view} className={activeView === view ? "nav-item active" : "nav-item"} onClick={() => setActiveView(view)}>{navIcon(view)}<span>{label}</span></button>)}</nav><div className="sidebar-note"><span className="status-dot" />Private ledger<br /><small>Read-only financial tracking</small></div></aside>
     <div className="main-content">
-      <header className="topbar"><div><p className="eyebrow">ARCIS FINANCE</p><h1>{activeView === "home" ? greeting() : viewTitle(activeView)}</h1><p className="subtitle">{activeView === "home" ? "Your money, clearly organised." : viewSubtitle(activeView)}</p></div><div className="top-actions">{activeView === "home" && <select className="global-period" value={reportingPeriod} onChange={(event) => void changeReportingPeriod(event.target.value as ReportingPeriod)} aria-label="Reporting period">{reportingPeriods.map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select>}<button className="icon-button notification-button" onClick={() => setActiveView("notifications")} aria-label={`Open notifications (${notifications.length} unread)`}><Bell size={19} aria-hidden="true" />{notifications.length > 0 && <b>{notifications.length}</b>}</button><button className="icon-button" onClick={() => void refresh()} aria-label="Refresh data">↻</button><button className="profile" onClick={() => setActiveView("mailboxes")} aria-label="Open mailbox settings">A</button></div></header>
+      <header className="topbar"><div><p className="eyebrow">ARCIS FINANCE</p><h1>{activeView === "home" ? greeting() : viewTitle(activeView)}</h1><p className="subtitle">{activeView === "home" ? "Your money, clearly organised." : viewSubtitle(activeView)}</p></div><div className="top-actions">{activeView === "home" && <select className="global-period" value={reportingPeriod} onChange={(event) => void changeReportingPeriod(event.target.value as ReportingPeriod)} aria-label="Reporting period">{reportingPeriods.map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select>}<button className="icon-button notification-button" onClick={() => setActiveView("notifications")} aria-label={`Open notifications (${notifications.length} unread)`}><Bell size={19} aria-hidden="true" />{notifications.length > 0 && <b>{notifications.length}</b>}</button><button className={`icon-button refresh-button${isSyncing ? " syncing" : ""}`} onClick={() => void syncConnectedMailboxes()} aria-label={isSyncing ? "Syncing Gmail" : "Sync Gmail and refresh data"} title={isSyncing ? "Syncing Gmail…" : "Get latest transactions and statements"} disabled={isSyncing}><RefreshCw size={19} aria-hidden="true" /></button><button className="profile" onClick={() => setActiveView("mailboxes")} aria-label="Open mailbox settings">A</button></div></header>
       <nav className="mobile-nav" aria-label="Primary navigation">{navigation.map(([view, label]) => <button key={view} className={activeView === view ? "active" : ""} onClick={() => setActiveView(view)}>{navIcon(view)}<span>{label}</span></button>)}</nav>
       {message && <p className="notice" role="status">{message}</p>}
 

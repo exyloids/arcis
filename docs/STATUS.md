@@ -14,6 +14,52 @@ The remaining Phase 5 work is full user/account erasure and final real-data
 visual sign-off. The user-facing Documents section has been removed; source
 files remain private implementation evidence governed through privacy controls.
 
+## Real-statement hardening and Home synchronization
+
+- The Home refresh control now queues a Gmail synchronization for every
+  connected mailbox, disables and animates while work is active, waits for all
+  jobs, reports scanned/added counters and partial failures, and reloads the
+  dashboard after completion.
+- A mailbox without a Gmail history cursor performs one sender-bounded 30-day
+  scan before recording its initial cursor. Subsequent refreshes use Gmail
+  History incrementally. This makes the first refresh retrieve recent
+  transactions and statement attachments without replaying the full mailbox.
+- The ICICI savings parser now reconstructs wrapped rows from visual Date,
+  Particulars, Deposits, Withdrawals, and Balance columns. Running-balance
+  cells anchor each row so amounts and totals cannot spill into an adjacent
+  transaction. Partial visual copies are merged in favor of explicit CR/DR
+  reconstructions, and B/F remains an opening-balance observation rather than
+  ledger activity.
+- SBI relationship-summary statements now treat `SAVING ACCOUNT` and
+  `DL/TL ACCOUNT` as hard section boundaries. Only savings transactions and
+  savings opening/closing balances are imported; principal repayments, loan
+  interest, demand-loan, and term-loan rows are excluded. SBI's Credit, Debit,
+  Balance column order is handled explicitly.
+- DCB account-summary and total-deposit balance rows are excluded from the
+  ledger. Genuine savings interest is retained as a credit and can reconcile
+  with its Gmail alert instead of creating a duplicate.
+- Development reset verification removed accounts, cards, transactions,
+  discoveries, imports, statement/parser records, notifications, queued jobs,
+  and private source objects while preserving the user, Gmail OAuth connection,
+  categories, and preferences. The mailbox cursor was reset deliberately for
+  clean reconfiguration.
+
+Verification completed on 2026-08-07:
+
+```bash
+.venv/bin/ruff check packages/backend/arcis_backend/statements.py \
+  packages/backend/arcis_backend/sync_jobs.py tests/test_pdf_statement_parser.py
+.venv/bin/python -m unittest tests.test_pdf_statement_parser -v
+ARCIS_INTEGRATION_DATABASE_URL=postgresql+psycopg://arcis:arcis@localhost:5432/arcis \
+  .venv/bin/python -m unittest tests.integration.test_sync_jobs_postgres -v
+(cd apps/web && npm run build)
+curl -fsS http://localhost:8000/ready
+```
+
+Result: Ruff passed; all 15 PDF parser tests passed; all three selected Gmail
+sync PostgreSQL integration tests passed; the Next.js production build passed;
+and the rebuilt API reported database and Redis readiness.
+
 ## Actionable notifications and statement-confirmed balances
 
 - The app now has a dedicated Notifications destination and an unread badge in

@@ -65,12 +65,12 @@ A string merely containing a bank domain is not trusted.
 
 ### OneCard
 
-- Messages from `getonecard.app` were present, but the reviewed mailbox set
-  contained promotional communications without a reliable masked card
-  identity or posted-transaction event.
-- Arcis must not create a card from sender presence alone. Until an identity is
-  available from a transaction alert or supported statement, the card requires
-  explicit user confirmation/manual creation.
+- Transaction alerts from `getonecard.app` may provide a literal `null`
+  `text/plain` MIME part and place the usable content only in `text/html`.
+- Purchase alerts identify the Federal Bank One Credit Card by its ending four
+  digits and provide amount, merchant, date, and time.
+- Promotional communications still must not create a card from sender presence
+  alone; discovery requires the masked identity and a concrete transaction.
 
 ## Product identity rules
 
